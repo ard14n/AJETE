@@ -1,0 +1,464 @@
+@import "tailwindcss";
+
+:root {
+  --background: #060c15;
+  --foreground: #edf5ff;
+  --bmw-black: #04070d;
+  --bmw-night: #081628;
+  --bmw-panel: #0c1f34;
+  --bmw-panel-soft: #132944;
+  --bmw-line: #2c4465;
+  --bmw-line-soft: #1d324f;
+  --bmw-text: #f3f8ff;
+  --bmw-muted: #9eb5cf;
+  --bmw-blue: #0066b1;
+  --bmw-cyan: #51bfff;
+  --bmw-red: #d34d5a;
+  --bmw-teal: #4de0df;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-drive-sans);
+  --font-mono: var(--font-drive-mono);
+}
+
+@keyframes drive-pan {
+  0% {
+    transform: translateX(-35%);
+  }
+  100% {
+    transform: translateX(35%);
+  }
+}
+
+@keyframes drive-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--bmw-text);
+  font-family: var(--font-drive-sans), sans-serif;
+  background-image:
+    radial-gradient(80% 120% at 15% -20%, rgba(0, 102, 177, 0.22), transparent 58%),
+    radial-gradient(60% 90% at 90% 0%, rgba(81, 191, 255, 0.18), transparent 54%),
+    linear-gradient(160deg, rgba(5, 11, 20, 0.98), rgba(6, 13, 23, 1) 42%, rgba(8, 21, 38, 1));
+}
+
+.font-display {
+  font-family: var(--font-drive-display), sans-serif;
+  letter-spacing: 0.04em;
+}
+
+.drive-shell {
+  position: relative;
+}
+
+.drive-shell::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(118deg, transparent 0%, rgba(255, 255, 255, 0.045) 46%, transparent 54%),
+    repeating-linear-gradient(
+      145deg,
+      rgba(255, 255, 255, 0.02) 0px,
+      rgba(255, 255, 255, 0.02) 1px,
+      transparent 1px,
+      transparent 28px
+    );
+  opacity: 0.55;
+  z-index: 0;
+}
+
+.drive-sidebar {
+  position: relative;
+  background:
+    linear-gradient(176deg, rgba(14, 35, 58, 0.94), rgba(8, 18, 32, 0.96)),
+    radial-gradient(120% 140% at -10% 0%, rgba(0, 102, 177, 0.24), transparent 52%);
+  border-right: 1px solid var(--bmw-line-soft);
+  backdrop-filter: blur(6px);
+  animation: drive-fade-up 420ms ease-out both;
+  z-index: 1;
+  overflow-x: hidden;
+}
+
+.drive-panel {
+  border: 1px solid var(--bmw-line-soft);
+  background: linear-gradient(160deg, rgba(20, 40, 65, 0.75), rgba(11, 23, 39, 0.9));
+  border-radius: 12px;
+  box-shadow: 0 14px 36px rgba(3, 8, 16, 0.45);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.drive-label {
+  color: var(--bmw-muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+}
+
+.drive-input,
+.drive-select,
+.drive-textarea {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--bmw-line);
+  background: linear-gradient(180deg, rgba(8, 18, 30, 0.9), rgba(8, 15, 25, 0.95));
+  color: var(--bmw-text);
+  border-radius: 9px;
+  padding: 0.58rem 0.75rem;
+  transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
+}
+
+.drive-input::placeholder,
+.drive-textarea::placeholder {
+  color: #7f95b2;
+}
+
+.drive-select {
+  appearance: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-right: 2rem;
+  background-image:
+    linear-gradient(45deg, transparent 50%, #7eb4e0 50%),
+    linear-gradient(135deg, #7eb4e0 50%, transparent 50%);
+  background-position:
+    calc(100% - 14px) calc(50% - 2px),
+    calc(100% - 9px) calc(50% - 2px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
+.drive-input:focus,
+.drive-select:focus,
+.drive-textarea:focus {
+  outline: none;
+  border-color: rgba(81, 191, 255, 0.8);
+  box-shadow: 0 0 0 3px rgba(81, 191, 255, 0.16);
+}
+
+.drive-select:disabled,
+.drive-textarea:disabled {
+  opacity: 0.55;
+}
+
+.drive-toggle {
+  border: 1px solid var(--bmw-line);
+  border-radius: 999px;
+  padding: 0.22rem 0.65rem;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.drive-toggle[data-on="true"] {
+  color: #d9f8ff;
+  border-color: rgba(81, 191, 255, 0.9);
+  background: linear-gradient(110deg, rgba(0, 102, 177, 0.45), rgba(77, 224, 223, 0.25));
+}
+
+.drive-toggle[data-on="false"] {
+  color: #adc1d8;
+  background: rgba(7, 16, 29, 0.7);
+}
+
+.drive-profile-note {
+  border-radius: 9px;
+  border: 1px solid rgba(84, 166, 213, 0.38);
+  background: linear-gradient(165deg, rgba(20, 45, 70, 0.5), rgba(8, 21, 37, 0.8));
+  color: #b7deff;
+}
+
+.drive-profile-note--warn {
+  border-color: rgba(215, 145, 57, 0.5);
+  background: linear-gradient(165deg, rgba(70, 42, 15, 0.44), rgba(38, 24, 9, 0.8));
+  color: #ffda97;
+}
+
+.drive-profile-note--bare {
+  border-color: rgba(82, 196, 239, 0.5);
+  background: linear-gradient(165deg, rgba(11, 54, 69, 0.5), rgba(8, 30, 40, 0.86));
+  color: #acecff;
+}
+
+.drive-divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(81, 191, 255, 0.35), transparent);
+}
+
+.drive-btn {
+  border-radius: 10px;
+  border: 1px solid transparent;
+  padding: 0.54rem 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  transition: transform 180ms ease, filter 180ms ease, opacity 180ms ease;
+}
+
+.drive-btn:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.06);
+}
+
+.drive-btn:disabled {
+  opacity: 0.5;
+  transform: none;
+}
+
+.drive-btn svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.drive-btn--primary {
+  color: #e8f6ff;
+  border-color: rgba(82, 185, 255, 0.5);
+  background: linear-gradient(105deg, #005698, #007bcf 40%, #2ca8e7);
+  box-shadow: 0 10px 22px rgba(0, 89, 153, 0.3);
+}
+
+.drive-btn--danger {
+  color: #fff3f4;
+  border-color: rgba(211, 77, 90, 0.45);
+  background: linear-gradient(106deg, #7f1f28, #a2313c 45%, #cc4552);
+  box-shadow: 0 10px 22px rgba(131, 34, 45, 0.26);
+}
+
+.drive-main {
+  position: relative;
+  z-index: 1;
+}
+
+.drive-main::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(40% 55% at 85% 12%, rgba(81, 191, 255, 0.1), transparent 72%),
+    radial-gradient(55% 65% at 18% 96%, rgba(0, 102, 177, 0.12), transparent 78%);
+  opacity: 0.9;
+}
+
+.drive-live,
+.drive-log {
+  border-left: 1px solid rgba(52, 73, 99, 0.24);
+  animation: drive-fade-up 460ms ease-out both;
+}
+
+.drive-ribbon {
+  position: absolute;
+  inset: 0 auto auto 0;
+  height: 4px;
+  width: 100%;
+  overflow: hidden;
+}
+
+.drive-ribbon::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 140%;
+  background: linear-gradient(90deg, #5cbff7 0%, #0066b1 36%, #3f9fd7 68%, #d34d5a 100%);
+  animation: drive-pan 7s linear infinite alternate;
+}
+
+.drive-heading {
+  color: #c5daef;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+}
+
+.drive-stream-wrap {
+  border: 1px solid var(--bmw-line-soft);
+  border-radius: 14px;
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(9, 20, 33, 0.95), rgba(6, 14, 23, 0.96));
+  box-shadow: 0 18px 42px rgba(2, 7, 14, 0.5);
+}
+
+.drive-stream-wrap::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(140deg, rgba(124, 196, 255, 0.06), transparent 28%, transparent 76%, rgba(211, 77, 90, 0.05));
+  z-index: 1;
+}
+
+.drive-pill {
+  border-radius: 999px;
+  padding: 0.2rem 0.56rem;
+  border: 1px solid rgba(54, 78, 105, 0.64);
+  background: rgba(7, 18, 30, 0.62);
+  color: #9fb6d1;
+  font-size: 11px;
+}
+
+.drive-hud {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.drive-chip {
+  border-radius: 999px;
+  border: 1px solid rgba(63, 91, 123, 0.88);
+  background: rgba(9, 22, 37, 0.78);
+  color: #bed4eb;
+  font-size: 11px;
+  padding: 0.24rem 0.58rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drive-chip--metric {
+  min-width: 122px;
+  justify-content: space-between;
+}
+
+.drive-chip-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.26rem;
+  color: #87a7cb;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-size: 10px;
+}
+
+.drive-chip-value {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #e7f2ff;
+}
+
+.drive-chip--on {
+  border-color: rgba(73, 180, 232, 0.72);
+  color: #bce8ff;
+}
+
+.drive-chip--ok {
+  border-color: rgba(74, 173, 132, 0.72);
+  color: #aeeed5;
+}
+
+.drive-chip--warn {
+  border-color: rgba(211, 77, 90, 0.7);
+  color: #ffc0c6;
+}
+
+.drive-log-entry {
+  animation: drive-fade-up 220ms ease-out both;
+}
+
+.drive-log-thought {
+  color: #b2dcff;
+}
+
+.drive-log-thought-tag {
+  color: #51bfff;
+  font-weight: 700;
+  margin-right: 0.45rem;
+}
+
+.drive-log-action {
+  color: #b7fae5;
+  border: 1px solid rgba(54, 173, 134, 0.45);
+  background: rgba(8, 45, 38, 0.5);
+  border-radius: 8px;
+  padding: 0.18rem 0.45rem;
+}
+
+.drive-log-error {
+  color: #ffd2d6;
+  border: 1px solid rgba(211, 77, 90, 0.45);
+  background: rgba(58, 17, 24, 0.6);
+  border-radius: 8px;
+  padding: 0.2rem 0.45rem;
+}
+
+.drive-log-status {
+  color: #8ea7c3;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 10px;
+}
+
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(92, 135, 181, 0.55) rgba(8, 17, 29, 0.4);
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 10px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: rgba(7, 15, 25, 0.45);
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(94, 148, 205, 0.76), rgba(40, 79, 121, 0.72));
+  border-radius: 9px;
+  border: 2px solid rgba(7, 15, 25, 0.8);
+}
+
+@media (max-width: 1023px) {
+  .drive-live,
+  .drive-log {
+    border-left: 0;
+  }
+
+  .drive-hud {
+    justify-content: flex-start;
+  }
+
+  .drive-chip {
+    max-width: 170px;
+  }
+}
+
+@media (min-width: 1280px) {
+  .drive-hud {
+    flex-wrap: nowrap;
+  }
+}
+
+@media (max-width: 560px) {
+  .drive-chip {
+    max-width: 100%;
+  }
+}
