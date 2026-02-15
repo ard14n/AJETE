@@ -4,6 +4,8 @@ import { PersonaConfig, PersonaTTSConfig } from './config/personas';
 import { injectSoM, setSoMOverlayVisibility, SoMElementMeta, SoMResult } from './utils/som';
 import { CursorPoint, ensureVisualCursor, generateHumanCursorPath, moveVisualCursor, showCursorClickEffect } from './utils/cursor';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { promises as fs } from 'fs';
+import path from 'path';
 
 // --- LLM Providers ---
 
@@ -30,11 +32,92 @@ interface AgentStartOptions {
     modelName?: string;
     ttsEnabled?: boolean;
     headlessMode?: boolean;
+    saveTrace?: boolean;
+    saveThoughts?: boolean;
+    saveScreenshots?: boolean;
 }
 
 interface TTSAudioPayload {
     audioBase64: string;
     mimeType: string;
+}
+
+type TraceActionType = 'goto' | 'click' | 'type' | 'scroll' | 'wait' | 'tab-switch';
+
+interface TraceStep {
+    id: number;
+    timestamp: string;
+    action: TraceActionType;
+    selector?: string;
+    value?: string;
+    x?: number;
+    y?: number;
+    deltaY?: number;
+    waitMs?: number;
+    url: string;
+    note?: string;
+}
+
+interface TraceExport {
+    version: 1;
+    createdAt: string;
+    runId: string;
+    startUrl: string;
+    finalUrl: string;
+    objective: string;
+    persona: string;
+    modelName: string;
+    steps: TraceStep[];
+}
+
+interface ThoughtRecord {
+    timestamp: string;
+    message: string;
+    url: string;
+}
+
+interface StepRecord {
+    id: number;
+    timestamp: string;
+    url: string;
+    thought: string;
+    action: string;
+    targetId?: string;
+    value?: string;
+}
+
+interface ErrorRecord {
+    timestamp: string;
+    message: string;
+}
+
+interface ScreenshotRecord {
+    step: number;
+    filename: string;
+    filePath: string;
+    url: string;
+}
+
+interface ReportSummary {
+    runId: string;
+    persona: string;
+    objective: string;
+    modelName: string;
+    startedAt: string;
+    endedAt: string;
+    durationMs: number;
+    totalSteps: number;
+    totalThoughts: number;
+    totalErrors: number;
+    totalScreenshots: number;
+    uniqueTargets: number;
+    actionBreakdown: Record<string, number>;
+    failedTargetCount: number;
+    toggles: {
+        saveTrace: boolean;
+        saveThoughts: boolean;
+        saveScreenshots: boolean;
+    };
 }
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -262,6 +345,9 @@ export class DriveAgent extends EventEmitter {
     private isDebugMode = true;
     private isTtsEnabled = false;
     private isHeadlessMode = false;
+    private isSaveTraceEnabled = false;
+    private isSaveThoughtsEnabled = false;
+    private isSaveScreenshotsEnabled = false;
     private selectedModelName = 'gemini-2.0-flash';
     private history: LLMResponse[] = [];
     private failedTargetIds: Map<string, number> = new Map();
@@ -278,6 +364,24 @@ export class DriveAgent extends EventEmitter {
     private pendingTtsAckTimer: ReturnType<typeof setTimeout> | null = null;
     private trackedPages: WeakSet<Page> = new WeakSet<Page>();
     private autoFollowedPages: WeakSet<Page> = new WeakSet<Page>();
+    private traceSteps: TraceStep[] = [];
+    private traceStepCounter = 0;
+    private traceStartUrl = '';
+    private traceObjective = '';
+    private tracePersonaName = '';
+    private traceSavedThisRun = false;
+    private currentRunId = '';
+    private currentRunDir = '';
+    private runStartedAt = '';
+    private thoughtLog: ThoughtRecord[] = [];
+    private stepLog: StepRecord[] = [];
+    private errorLog: ErrorRecord[] = [];
+    private screenshotLog: ScreenshotRecord[] = [];
+    private generatedTraceJsonPath: string | null = null;
+    private generatedTraceSpecPath: string | null = null;
+    private generatedReportJsonPath: string | null = null;
+    private generatedReportPdfPath: string | null = null;
+    private generatedReportCsvPath: string | null = null;
     private llm: LLMProvider;
 
     constructor(apiKey?: string) {
@@ -289,6 +393,514 @@ export class DriveAgent extends EventEmitter {
             console.warn("No API Key provided, using MockProvider");
             this.llm = new MockProvider();
         }
+
+        this.on('thought', (message) => {
+            if (typeof message !== 'string') return;
+            this.thoughtLog.push({
+                timestamp: new Date().toISOString(),
+                message,
+                url: this.page?.url() || this.traceStartUrl || ''
+            });
+        });
+
+        this.on('step', (step: any) => {
+            if (!step || typeof step !== 'object') return;
+            this.stepLog.push({
+                id: Number(step.id) || (this.stepLog.length + 1),
+                timestamp: new Date().toISOString(),
+                url: this.page?.url() || this.traceStartUrl || '',
+                thought: typeof step.thought === 'string' ? step.thought : '',
+                action: typeof step.action === 'string' ? step.action : '',
+                targetId: step.targetId !== undefined && step.targetId !== null ? String(step.targetId) : undefined,
+                value: typeof step.value === 'string' ? step.value : undefined
+            });
+        });
+
+        this.on('error', (err: any) => {
+            const message = err instanceof Error ? err.message : String(err ?? 'Unknown error');
+            this.errorLog.push({
+                timestamp: new Date().toISOString(),
+                message
+            });
+        });
+    }
+
+    private getArtifactsRootDir() {
+        return path.resolve(process.cwd(), 'artifacts');
+    }
+
+    private toDownloadUrl(absPath: string): string {
+        const relative = path.relative(this.getArtifactsRootDir(), absPath).split(path.sep).join('/');
+        return `/downloads/${relative}`;
+    }
+
+    private formatIsoForFile(date: Date): string {
+        return date.toISOString().replace(/[:.]/g, '-');
+    }
+
+    private async initializeRunStorage(personaName: string) {
+        const started = new Date();
+        const timestamp = this.formatIsoForFile(started);
+        const personaSlug = this.sanitizeFileFragment(personaName, 'persona');
+        this.currentRunId = `${timestamp}-${personaSlug}`;
+        this.currentRunDir = path.join(this.getArtifactsRootDir(), this.currentRunId);
+        this.runStartedAt = started.toISOString();
+        await fs.mkdir(this.currentRunDir, { recursive: true });
+    }
+
+    private sanitizeFileFragment(input: string, fallback: string): string {
+        const cleaned = input
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '');
+        return cleaned || fallback;
+    }
+
+    private escapeTsString(value: string): string {
+        return value
+            .replace(/\\/g, '\\\\')
+            .replace(/'/g, "\\'")
+            .replace(/\r/g, '\\r')
+            .replace(/\n/g, '\\n');
+    }
+
+    private createTraceStep(step: Omit<TraceStep, 'id' | 'timestamp' | 'url'>) {
+        if (!this.isSaveTraceEnabled) return;
+        this.traceStepCounter += 1;
+        this.traceSteps.push({
+            id: this.traceStepCounter,
+            timestamp: new Date().toISOString(),
+            url: this.page?.url() || this.traceStartUrl || '',
+            ...step
+        });
+    }
+
+    private async captureSelectorForLocator(locator: Locator): Promise<string | null> {
+        try {
+            const selector = await locator.evaluate((el) => {
+                const escapeCss = (value: string): string => {
+                    const css = (window as any).CSS;
+                    if (css?.escape) return css.escape(value);
+                    return value.replace(/[^a-zA-Z0-9_-]/g, (char) => `\\${char}`);
+                };
+
+                const quoteAttr = (value: string): string =>
+                    value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+
+                const unique = (sel: string): boolean => {
+                    try {
+                        return document.querySelectorAll(sel).length === 1;
+                    } catch {
+                        return false;
+                    }
+                };
+
+                const element = el as HTMLElement;
+                const tag = element.tagName.toLowerCase();
+
+                if (element.id) {
+                    const idSelector = `#${escapeCss(element.id)}`;
+                    if (unique(idSelector)) return idSelector;
+                }
+
+                const testAttrs = ['data-testid', 'data-test', 'data-qa', 'data-cy'];
+                for (const attr of testAttrs) {
+                    const value = element.getAttribute(attr);
+                    if (!value) continue;
+                    const selector = `[${attr}="${quoteAttr(value)}"]`;
+                    if (unique(selector)) return selector;
+                }
+
+                if ((tag === 'input' || tag === 'textarea' || tag === 'select')) {
+                    const name = element.getAttribute('name');
+                    if (name) {
+                        const selector = `${tag}[name="${quoteAttr(name)}"]`;
+                        if (unique(selector)) return selector;
+                    }
+
+                    const placeholder = element.getAttribute('placeholder');
+                    if (placeholder) {
+                        const selector = `${tag}[placeholder="${quoteAttr(placeholder)}"]`;
+                        if (unique(selector)) return selector;
+                    }
+                }
+
+                if (tag === 'a') {
+                    const href = element.getAttribute('href');
+                    if (href) {
+                        const selector = `a[href="${quoteAttr(href)}"]`;
+                        if (unique(selector)) return selector;
+                    }
+                }
+
+                const ariaLabel = element.getAttribute('aria-label');
+                if (ariaLabel) {
+                    const selector = `${tag}[aria-label="${quoteAttr(ariaLabel)}"]`;
+                    if (unique(selector)) return selector;
+                }
+
+                const chain: string[] = [];
+                let current: HTMLElement | null = element;
+                while (current && current !== document.body && chain.length < 7) {
+                    let part = current.tagName.toLowerCase();
+                    if (current.id) {
+                        part += `#${escapeCss(current.id)}`;
+                        chain.unshift(part);
+                        break;
+                    }
+
+                    const parent = current.parentElement;
+                    if (parent) {
+                        const sameTagSiblings = Array.from(parent.children)
+                            .filter((child) => (child as HTMLElement).tagName === current!.tagName);
+                        const position = sameTagSiblings.indexOf(current) + 1;
+                        part += `:nth-of-type(${Math.max(1, position)})`;
+                    }
+                    chain.unshift(part);
+                    current = parent as HTMLElement | null;
+                }
+
+                const fallback = chain.join(' > ');
+                return fallback || null;
+            });
+
+            return typeof selector === 'string' && selector.trim().length > 0 ? selector : null;
+        } catch {
+            return null;
+        }
+    }
+
+    private csvEscape(value: unknown): string {
+        const raw = String(value ?? '');
+        if (!/[",\n]/.test(raw)) return raw;
+        return `"${raw.replace(/"/g, '""')}"`;
+    }
+
+    private buildMetricsSummary(endedAtIso: string): ReportSummary {
+        const actionBreakdown: Record<string, number> = {};
+        const targetSet = new Set<string>();
+
+        for (const step of this.stepLog) {
+            actionBreakdown[step.action] = (actionBreakdown[step.action] || 0) + 1;
+            if (step.targetId) targetSet.add(step.targetId);
+        }
+
+        const failedTargetCount = Array.from(this.failedTargetIds.values()).reduce((acc, value) => acc + value, 0);
+        const startedMs = Date.parse(this.runStartedAt || endedAtIso);
+        const endedMs = Date.parse(endedAtIso);
+        const durationMs = Number.isFinite(startedMs) && Number.isFinite(endedMs)
+            ? Math.max(0, endedMs - startedMs)
+            : 0;
+
+        return {
+            runId: this.currentRunId,
+            persona: this.tracePersonaName,
+            objective: this.traceObjective,
+            modelName: this.selectedModelName,
+            startedAt: this.runStartedAt || endedAtIso,
+            endedAt: endedAtIso,
+            durationMs,
+            totalSteps: this.stepLog.length,
+            totalThoughts: this.thoughtLog.length,
+            totalErrors: this.errorLog.length,
+            totalScreenshots: this.screenshotLog.length,
+            uniqueTargets: targetSet.size,
+            actionBreakdown,
+            failedTargetCount,
+            toggles: {
+                saveTrace: this.isSaveTraceEnabled,
+                saveThoughts: this.isSaveThoughtsEnabled,
+                saveScreenshots: this.isSaveScreenshotsEnabled
+            }
+        };
+    }
+
+    private async persistThoughtArtifacts() {
+        if (!this.isSaveThoughtsEnabled) return;
+        if (!this.currentRunDir) return;
+
+        const thoughtDir = path.join(this.currentRunDir, 'thoughts');
+        await fs.mkdir(thoughtDir, { recursive: true });
+
+        const jsonPath = path.join(thoughtDir, 'thoughts.json');
+        const txtPath = path.join(thoughtDir, 'thoughts.txt');
+
+        const txtContent = this.thoughtLog
+            .map((item) => `[${item.timestamp}] ${item.message}`)
+            .join('\n');
+
+        await fs.writeFile(jsonPath, JSON.stringify(this.thoughtLog, null, 2), 'utf8');
+        await fs.writeFile(txtPath, txtContent, 'utf8');
+    }
+
+    private async persistStepScreenshot(stepNumber: number, screenshotBase64: string) {
+        if (!this.isSaveScreenshotsEnabled) return;
+        if (!this.currentRunDir || !screenshotBase64) return;
+
+        try {
+            const screenshotDir = path.join(this.currentRunDir, 'screenshots');
+            await fs.mkdir(screenshotDir, { recursive: true });
+            const filename = `step-${String(stepNumber).padStart(4, '0')}.png`;
+            const filePath = path.join(screenshotDir, filename);
+            await fs.writeFile(filePath, Buffer.from(screenshotBase64, 'base64'));
+            this.screenshotLog.push({
+                step: stepNumber,
+                filename,
+                filePath,
+                url: this.toDownloadUrl(filePath)
+            });
+        } catch (error) {
+            console.warn('Failed to persist screenshot artifact:', error);
+        }
+    }
+
+    private async buildReportPdf(summary: ReportSummary, outputPath: string) {
+        const screenshotPreviews = [];
+        for (const shot of this.screenshotLog.slice(0, 12)) {
+            try {
+                const base64 = await fs.readFile(shot.filePath, 'base64');
+                screenshotPreviews.push({
+                    step: shot.step,
+                    dataUrl: `data:image/png;base64,${base64}`
+                });
+            } catch {
+                // ignore unreadable screenshot
+            }
+        }
+
+        const actionRows = Object.entries(summary.actionBreakdown)
+            .map(([action, count]) => `<tr><td>${action}</td><td style="text-align:right">${count}</td></tr>`)
+            .join('');
+
+        const thoughtRows = this.thoughtLog
+            .slice(-20)
+            .map((thought) => `<tr><td>${thought.timestamp}</td><td>${thought.message.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td></tr>`)
+            .join('');
+
+        const screenshotCards = screenshotPreviews
+            .map((shot) => `<div style="break-inside:avoid;margin:0 0 14px 0"><div style="font-size:11px;color:#4f5f76;margin-bottom:4px">Step ${shot.step}</div><img src="${shot.dataUrl}" style="width:100%;border:1px solid #d6dfeb;border-radius:6px" /></div>`)
+            .join('');
+
+        const html = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>DRIVE Report ${summary.runId}</title>
+<style>
+body { font-family: Arial, sans-serif; color:#0f1b2a; margin: 24px; }
+h1 { margin: 0 0 6px 0; font-size: 26px; }
+h2 { margin: 18px 0 8px 0; font-size: 16px; }
+table { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
+th, td { border: 1px solid #d3dce8; padding: 6px 8px; font-size: 12px; vertical-align: top; }
+th { background: #f1f6fb; text-align: left; }
+.meta { color:#3b4f67; font-size:12px; margin: 2px 0; }
+.grid { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+</style>
+</head>
+<body>
+  <h1>DRIVE Session Report</h1>
+  <div class="meta"><strong>Run ID:</strong> ${summary.runId}</div>
+  <div class="meta"><strong>Persona:</strong> ${summary.persona}</div>
+  <div class="meta"><strong>Objective:</strong> ${summary.objective || '-'}</div>
+  <div class="meta"><strong>Model:</strong> ${summary.modelName}</div>
+  <div class="meta"><strong>Duration:</strong> ${(summary.durationMs / 1000).toFixed(1)}s</div>
+
+  <h2>Metrics</h2>
+  <table>
+    <tr><th>Total Steps</th><th>Total Thoughts</th><th>Total Screenshots</th><th>Total Errors</th><th>Unique Targets</th></tr>
+    <tr><td>${summary.totalSteps}</td><td>${summary.totalThoughts}</td><td>${summary.totalScreenshots}</td><td>${summary.totalErrors}</td><td>${summary.uniqueTargets}</td></tr>
+  </table>
+
+  <h2>Action Breakdown</h2>
+  <table>
+    <tr><th>Action</th><th>Count</th></tr>
+    ${actionRows || '<tr><td colspan="2">No actions recorded</td></tr>'}
+  </table>
+
+  <h2>Recent Thoughts</h2>
+  <table>
+    <tr><th>Timestamp</th><th>Thought</th></tr>
+    ${thoughtRows || '<tr><td colspan="2">No thoughts recorded</td></tr>'}
+  </table>
+
+  <h2>Screenshots (first 12)</h2>
+  <div class="grid">
+    ${screenshotCards || '<div>No screenshots saved for this run.</div>'}
+  </div>
+</body>
+</html>`;
+
+        const browser = await chromium.launch({ headless: true });
+        try {
+            const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+            await page.setContent(html, { waitUntil: 'domcontentloaded' });
+            await page.pdf({ path: outputPath, format: 'A4', printBackground: true, margin: { top: '12mm', right: '10mm', bottom: '12mm', left: '10mm' } });
+        } finally {
+            await browser.close();
+        }
+    }
+
+    private async persistReportArtifacts() {
+        if (!this.currentRunDir) return;
+
+        const endedAt = new Date().toISOString();
+        const summary = this.buildMetricsSummary(endedAt);
+        const reportDir = path.join(this.currentRunDir, 'report');
+        await fs.mkdir(reportDir, { recursive: true });
+
+        const reportPayload = {
+            summary,
+            files: {
+                traceJson: this.generatedTraceJsonPath,
+                traceSpec: this.generatedTraceSpecPath
+            },
+            thoughts: this.thoughtLog,
+            steps: this.stepLog,
+            errors: this.errorLog,
+            screenshots: this.screenshotLog
+        };
+
+        const reportJsonPath = path.join(reportDir, 'report.json');
+        const reportCsvPath = path.join(reportDir, 'steps.csv');
+        const reportPdfPath = path.join(reportDir, 'report.pdf');
+
+        const csvRows = [
+            ['id', 'timestamp', 'action', 'targetId', 'value', 'thought', 'url'],
+            ...this.stepLog.map((step) => [
+                String(step.id),
+                step.timestamp,
+                step.action,
+                step.targetId || '',
+                step.value || '',
+                step.thought || '',
+                step.url || ''
+            ])
+        ].map((row) => row.map((value) => this.csvEscape(value)).join(','));
+
+        await fs.writeFile(reportJsonPath, JSON.stringify(reportPayload, null, 2), 'utf8');
+        await fs.writeFile(reportCsvPath, `${csvRows.join('\n')}\n`, 'utf8');
+        await this.buildReportPdf(summary, reportPdfPath);
+
+        this.generatedReportJsonPath = reportJsonPath;
+        this.generatedReportCsvPath = reportCsvPath;
+        this.generatedReportPdfPath = reportPdfPath;
+
+        this.emit('report_ready', {
+            runId: this.currentRunId,
+            jsonPath: reportJsonPath,
+            csvPath: reportCsvPath,
+            pdfPath: reportPdfPath,
+            jsonUrl: this.toDownloadUrl(reportJsonPath),
+            csvUrl: this.toDownloadUrl(reportCsvPath),
+            pdfUrl: this.toDownloadUrl(reportPdfPath)
+        });
+        this.emit('thought', `🧾 Report bereit: ${reportPdfPath}`);
+    }
+
+    private buildTraceSpec(trace: TraceExport): string {
+        const testName = `DRIVE trace replay (${trace.persona || 'agent'})`;
+        const lines: string[] = [];
+
+        lines.push(`import { test } from '@playwright/test';`);
+        lines.push('');
+        lines.push(`test('${this.escapeTsString(testName)}', async ({ page, context }) => {`);
+        lines.push(`  let activePage = page;`);
+        lines.push(`  await activePage.goto('${this.escapeTsString(trace.startUrl)}', { waitUntil: 'domcontentloaded' });`);
+
+        for (const step of trace.steps) {
+            const note = step.note ? ` // ${this.escapeTsString(step.note)}` : '';
+            if (step.action === 'goto') {
+                lines.push(`  await activePage.goto('${this.escapeTsString(step.url || trace.startUrl)}', { waitUntil: 'domcontentloaded' });${note}`);
+                continue;
+            }
+
+            if (step.action === 'click') {
+                if (step.selector) {
+                    lines.push(`  await activePage.locator('${this.escapeTsString(step.selector)}').first().click({ timeout: 15000 });${note}`);
+                } else if (typeof step.x === 'number' && typeof step.y === 'number') {
+                    lines.push(`  await activePage.mouse.click(${Math.round(step.x)}, ${Math.round(step.y)});${note}`);
+                }
+                continue;
+            }
+
+            if (step.action === 'type') {
+                if (step.selector) {
+                    lines.push(`  {`);
+                    lines.push(`    const field = activePage.locator('${this.escapeTsString(step.selector)}').first();`);
+                    lines.push(`    await field.fill('');`);
+                    lines.push(`    await field.type('${this.escapeTsString(step.value || '')}', { delay: 45 });`);
+                    lines.push(`  }${note}`);
+                } else if (step.value) {
+                    lines.push(`  await activePage.keyboard.type('${this.escapeTsString(step.value)}', { delay: 45 });${note}`);
+                }
+                continue;
+            }
+
+            if (step.action === 'scroll') {
+                const deltaY = Number.isFinite(step.deltaY) ? Math.round(step.deltaY as number) : 520;
+                lines.push(`  await activePage.mouse.wheel(0, ${deltaY});${note}`);
+                continue;
+            }
+
+            if (step.action === 'wait') {
+                const waitMs = Number.isFinite(step.waitMs) ? Math.max(0, Math.round(step.waitMs as number)) : 2000;
+                lines.push(`  await activePage.waitForTimeout(${waitMs});${note}`);
+                continue;
+            }
+
+            if (step.action === 'tab-switch') {
+                lines.push(`  {`);
+                lines.push(`    const pages = context.pages();`);
+                lines.push(`    activePage = pages[pages.length - 1] || activePage;`);
+                lines.push(`    await activePage.bringToFront();${note}`);
+                lines.push(`    await activePage.waitForLoadState('domcontentloaded').catch(() => {});`);
+                lines.push(`  }`);
+            }
+        }
+
+        lines.push('});');
+        lines.push('');
+        return lines.join('\n');
+    }
+
+    private async persistTraceArtifacts() {
+        if (!this.isSaveTraceEnabled) return;
+        if (this.traceSavedThisRun) return;
+        if (this.traceSteps.length === 0) return;
+        if (!this.currentRunDir) return;
+
+        const traceDir = path.join(this.currentRunDir, 'trace');
+        await fs.mkdir(traceDir, { recursive: true });
+
+        const traceData: TraceExport = {
+            version: 1,
+            createdAt: new Date().toISOString(),
+            runId: this.currentRunId,
+            startUrl: this.traceStartUrl,
+            finalUrl: this.page?.url() || this.traceStartUrl,
+            objective: this.traceObjective,
+            persona: this.tracePersonaName,
+            modelName: this.selectedModelName,
+            steps: this.traceSteps
+        };
+
+        const base = `trace-${this.currentRunId}`;
+        const jsonPath = path.join(traceDir, `${base}.json`);
+        const specPath = path.join(traceDir, `${base}.spec.ts`);
+        await fs.writeFile(jsonPath, JSON.stringify(traceData, null, 2), 'utf8');
+        await fs.writeFile(specPath, this.buildTraceSpec(traceData), 'utf8');
+
+        this.generatedTraceJsonPath = jsonPath;
+        this.generatedTraceSpecPath = specPath;
+        this.traceSavedThisRun = true;
+        this.emit('trace_saved', {
+            jsonPath,
+            specPath,
+            jsonUrl: this.toDownloadUrl(jsonPath),
+            specUrl: this.toDownloadUrl(specPath),
+            steps: this.traceSteps.length
+        });
+        this.emit('thought', `💾 Trace gespeichert: ${specPath}`);
     }
 
     async start(url: string, persona: PersonaConfig, objective?: string, options?: AgentStartOptions) {
@@ -299,6 +911,9 @@ export class DriveAgent extends EventEmitter {
         this.isDebugMode = options?.debugMode !== false;
         this.isTtsEnabled = Boolean(options?.ttsEnabled);
         this.isHeadlessMode = Boolean(options?.headlessMode);
+        this.isSaveTraceEnabled = Boolean(options?.saveTrace);
+        this.isSaveThoughtsEnabled = Boolean(options?.saveThoughts);
+        this.isSaveScreenshotsEnabled = Boolean(options?.saveScreenshots);
         this.selectedModelName = (options?.modelName || 'gemini-2.0-flash').trim() || 'gemini-2.0-flash';
         this.ttsConfig = {
             voiceName: persona.tts?.voiceName || DEFAULT_TTS_VOICE,
@@ -310,10 +925,29 @@ export class DriveAgent extends EventEmitter {
         this.history = [];
         this.failedTargetIds.clear();
         this.stagnationCounter = 0;
+        this.traceSteps = [];
+        this.traceStepCounter = 0;
+        this.traceStartUrl = url;
+        this.traceObjective = objective || '';
+        this.tracePersonaName = persona.name;
+        this.traceSavedThisRun = false;
+        this.thoughtLog = [];
+        this.stepLog = [];
+        this.errorLog = [];
+        this.screenshotLog = [];
+        this.generatedTraceJsonPath = null;
+        this.generatedTraceSpecPath = null;
+        this.generatedReportJsonPath = null;
+        this.generatedReportPdfPath = null;
+        this.generatedReportCsvPath = null;
+        this.currentRunId = '';
+        this.currentRunDir = '';
+        this.runStartedAt = '';
         this.clearPendingTtsAck();
         this.emit('status', 'starting');
 
         try {
+            await this.initializeRunStorage(persona.name);
             this.browser = await chromium.launch({ headless: this.isHeadlessMode });
             this.context = await this.browser.newContext(persona.contextOptions);
             this.page = await this.context.newPage();
@@ -333,6 +967,9 @@ export class DriveAgent extends EventEmitter {
             this.emit('thought', `Debug Mode: ${this.isDebugMode ? 'ON' : 'OFF'}`);
             this.emit('thought', `Voice TTS: ${this.isTtsEnabled ? 'ON' : 'OFF'}`);
             this.emit('thought', `Browser Mode: ${this.isHeadlessMode ? 'HEADLESS' : 'VISIBLE'}`);
+            this.emit('thought', `Save Trace: ${this.isSaveTraceEnabled ? 'ON' : 'OFF'}`);
+            this.emit('thought', `Save Thoughts: ${this.isSaveThoughtsEnabled ? 'ON' : 'OFF'}`);
+            this.emit('thought', `Save Screenshots: ${this.isSaveScreenshotsEnabled ? 'ON' : 'OFF'}`);
             if (this.isTtsEnabled) {
                 this.emit('thought', `TTS Voice: ${this.ttsConfig.voiceName} (${this.ttsConfig.languageCode})`);
             }
@@ -343,6 +980,7 @@ export class DriveAgent extends EventEmitter {
             } catch (navError: any) {
                 this.emit('thought', `⚠️ Navigation warning: ${navError.message}. Continuing anyway...`);
             }
+            this.createTraceStep({ action: 'goto', note: 'initial navigation' });
 
             // Wait for SPA hydration
             await this.page.waitForTimeout(2000);
@@ -365,6 +1003,9 @@ export class DriveAgent extends EventEmitter {
         this.isDebugMode = true;
         this.isTtsEnabled = false;
         this.isHeadlessMode = false;
+        const shouldPersistTrace = this.isSaveTraceEnabled;
+        const shouldPersistThoughts = this.isSaveThoughtsEnabled;
+        const shouldPersistScreenshots = this.isSaveScreenshotsEnabled;
         this.selectedModelName = 'gemini-2.0-flash';
         this.ttsConfig = {
             voiceName: DEFAULT_TTS_VOICE,
@@ -374,6 +1015,33 @@ export class DriveAgent extends EventEmitter {
         this.trackedPages = new WeakSet<Page>();
         this.autoFollowedPages = new WeakSet<Page>();
         this.clearPendingTtsAck();
+        if (shouldPersistTrace) {
+            try {
+                await this.persistTraceArtifacts();
+            } catch (error) {
+                const message = error instanceof Error ? error.message : 'Unbekannter Fehler beim Trace-Speichern';
+                this.emit('thought', `⚠️ Trace konnte nicht gespeichert werden: ${message}`);
+            }
+        }
+        if (shouldPersistThoughts) {
+            try {
+                await this.persistThoughtArtifacts();
+            } catch (error) {
+                const message = error instanceof Error ? error.message : 'Unbekannter Fehler beim Thought-Export';
+                this.emit('thought', `⚠️ Thoughts konnten nicht gespeichert werden: ${message}`);
+            }
+        }
+        if (shouldPersistTrace || shouldPersistThoughts || shouldPersistScreenshots || this.stepLog.length > 0) {
+            try {
+                await this.persistReportArtifacts();
+            } catch (error) {
+                const message = error instanceof Error ? error.message : 'Unbekannter Fehler beim Report-Export';
+                this.emit('thought', `⚠️ Report konnte nicht erstellt werden: ${message}`);
+            }
+        }
+        this.isSaveTraceEnabled = false;
+        this.isSaveThoughtsEnabled = false;
+        this.isSaveScreenshotsEnabled = false;
         this.emit('status', 'stopped');
         if (this.context) await this.context.close();
         if (this.browser) await this.browser.close();
@@ -452,6 +1120,10 @@ export class DriveAgent extends EventEmitter {
         await nextPage.bringToFront().catch(() => { });
         await this.initializeCursor().catch(() => { });
         const nextUrl = nextPage.url();
+        this.createTraceStep({
+            action: 'tab-switch',
+            note: `source=${source} url=${nextUrl || '(unbekannt)'}`
+        });
         this.emit('thought', `🔀 Neuer Tab erkannt (${source}). Folge zu ${nextUrl || '(unbekannt)'}.`);
     }
 
@@ -643,6 +1315,7 @@ export class DriveAgent extends EventEmitter {
                     }
 
                     this.emit('screenshot', `data:image/png;base64,${streamScreenshotBase64}`);
+                    await this.persistStepScreenshot(stepCount, streamScreenshotBase64);
                 } catch (e) {
                     console.log("Screenshot failed, page likely closed.");
                     break;
@@ -769,10 +1442,13 @@ ${dynamicHints}
         const visible = await locator.isVisible({ timeout: 250 }).catch(() => false);
         if (!visible) return false;
 
+        const selector = await this.captureSelectorForLocator(locator);
         await locator.scrollIntoViewIfNeeded().catch(() => { });
+        let clickedPoint: CursorPoint | null = null;
         const box = await locator.boundingBox().catch(() => null);
         if (box) {
             const point = this.pickTargetPoint(box);
+            clickedPoint = point;
             await this.clickAtPoint(point);
         } else {
             await locator.click({ timeout: 2000 }).catch(() => { });
@@ -782,6 +1458,13 @@ ${dynamicHints}
         const stillVisible = await this.isCookieSurfaceVisible();
         if (!stillVisible) {
             console.log(`🍪 Cookie dismissed via ${source}`);
+            this.createTraceStep({
+                action: 'click',
+                selector: selector || undefined,
+                x: clickedPoint ? Math.round(clickedPoint.x) : undefined,
+                y: clickedPoint ? Math.round(clickedPoint.y) : undefined,
+                note: `cookie banner (${source})`
+            });
             this.emit('thought', "🍪 Cookie-Banner akzeptiert.");
             return true;
         }
@@ -939,6 +1622,12 @@ ${dynamicHints}
                 await this.clickAtPoint(visionTarget.point);
                 await this.page.waitForTimeout(850);
                 if (!(await this.isCookieSurfaceVisible())) {
+                    this.createTraceStep({
+                        action: 'click',
+                        x: Math.round(visionTarget.point.x),
+                        y: Math.round(visionTarget.point.y),
+                        note: `cookie banner vision fallback (${visionTarget.label})`
+                    });
                     this.emit('thought', "🍪 Cookie-Banner per Koordinaten-Klick akzeptiert.");
                 }
             }
@@ -1298,6 +1987,7 @@ ${loopGuard}
             const locator = this.page.locator(selector).first();
             if (await locator.count() > 0) {
                 await locator.scrollIntoViewIfNeeded();
+                const traceSelector = await this.captureSelectorForLocator(locator);
                 const box = await locator.boundingBox();
                 if (!box) {
                     this.markTargetFailure(decision.targetId);
@@ -1311,6 +2001,13 @@ ${loopGuard}
                 await this.page.waitForTimeout(this.randomBetween(35, 95));
                 await showCursorClickEffect(this.page, targetPoint, 'up');
                 await this.page.mouse.up();
+                this.createTraceStep({
+                    action: 'click',
+                    selector: traceSelector || undefined,
+                    x: Math.round(targetPoint.x),
+                    y: Math.round(targetPoint.y),
+                    note: decision.targetId ? `som-id ${decision.targetId}` : undefined
+                });
             } else {
                 this.markTargetFailure(decision.targetId);
                 throw new Error(`Element ${decision.targetId} not found`);
@@ -1322,7 +2019,12 @@ ${loopGuard}
                 y: this.clamp(this.cursorPosition.y + this.randomBetween(-80, 80), 4, viewport.height - 4)
             };
             await this.moveCursorHumanLike(roamPoint, 0.7);
-            await this.page.mouse.wheel(0, this.randomBetween(320, 680));
+            const deltaY = this.randomBetween(320, 680);
+            await this.page.mouse.wheel(0, deltaY);
+            this.createTraceStep({
+                action: 'scroll',
+                deltaY: Math.round(deltaY)
+            });
         } else if (decision.action === 'type' && decision.targetId && decision.value) {
             const selector = `[data-som-id="${decision.targetId}"]`;
             const locator = this.page.locator(selector).first();
@@ -1332,6 +2034,7 @@ ${loopGuard}
             }
 
             await locator.scrollIntoViewIfNeeded();
+            let traceSelector = await this.captureSelectorForLocator(locator);
             const box = await locator.boundingBox();
             if (!box) {
                 this.markTargetFailure(decision.targetId);
@@ -1355,6 +2058,7 @@ ${loopGuard}
                     throw new Error(`Target ${decision.targetId} is not a fillable field and no nearby input was found`);
                 }
                 inputLocator = fallback;
+                traceSelector = await this.captureSelectorForLocator(inputLocator);
                 await inputLocator.scrollIntoViewIfNeeded();
                 const fallbackBox = await inputLocator.boundingBox();
                 if (fallbackBox) {
@@ -1371,8 +2075,19 @@ ${loopGuard}
 
             await inputLocator.fill('');
             await this.page.keyboard.type(decision.value, { delay: Math.floor(this.randomBetween(35, 85)) });
+            this.createTraceStep({
+                action: 'type',
+                selector: traceSelector || undefined,
+                value: decision.value,
+                note: decision.targetId ? `som-id ${decision.targetId}` : undefined
+            });
         } else if (decision.action === 'wait') {
-            await this.page.waitForTimeout(2000);
+            const waitMs = 2000;
+            await this.page.waitForTimeout(waitMs);
+            this.createTraceStep({
+                action: 'wait',
+                waitMs
+            });
         }
     }
 }

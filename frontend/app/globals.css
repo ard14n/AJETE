@@ -247,6 +247,27 @@ body {
   box-shadow: 0 10px 22px rgba(131, 34, 45, 0.26);
 }
 
+.drive-download-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(81, 191, 255, 0.38);
+  border-radius: 8px;
+  padding: 0.4rem 0.6rem;
+  background: linear-gradient(120deg, rgba(7, 24, 42, 0.88), rgba(8, 31, 54, 0.86));
+  color: #cce7ff;
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: border-color 160ms ease, transform 160ms ease, background 160ms ease;
+}
+
+.drive-download-link:hover {
+  border-color: rgba(103, 209, 255, 0.9);
+  background: linear-gradient(120deg, rgba(10, 34, 58, 0.94), rgba(12, 41, 69, 0.94));
+  transform: translateY(-1px);
+}
+
 .drive-main {
   position: relative;
   z-index: 1;

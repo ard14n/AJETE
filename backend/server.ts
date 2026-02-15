@@ -3,6 +3,7 @@ import http from 'http';
 import { WebSocketServer } from 'ws';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import path from 'path';
 import { DriveAgent } from './agent';
 import { getMonkeyContextPersona, getPersona } from './config/personas';
 
@@ -23,6 +24,7 @@ const wss = new WebSocketServer({ server });
 
 app.use(cors());
 app.use(express.json());
+app.use('/downloads', express.static(path.resolve(process.cwd(), 'artifacts')));
 
 const PORT = 3001;
 const API_KEY = process.env.GEMINI_API_KEY;
@@ -59,6 +61,8 @@ agent.on('tts', (data) => {
     }
 });
 agent.on('error', (err) => broadcast('error', err.message));
+agent.on('trace_saved', (data) => broadcast('trace_saved', data));
+agent.on('report_ready', (data) => broadcast('report_ready', data));
 
 wss.on('connection', (socket) => {
     socket.on('message', (raw) => {
@@ -84,7 +88,7 @@ wss.on('connection', (socket) => {
 
 // API Routes
 app.post('/start', async (req, res) => {
-    const { url, personaName, objective, debugMode, modelName, ttsEnabled, headlessMode } = req.body;
+    const { url, personaName, objective, debugMode, modelName, ttsEnabled, headlessMode, saveTrace, saveThoughts, saveScreenshots } = req.body;
     if (!url) return res.status(400).json({ error: 'URL is required' });
 
     const monkeyMode = String(personaName || '').toLowerCase() === 'monkey';
@@ -94,6 +98,9 @@ app.post('/start', async (req, res) => {
     const streamDebugMode = typeof debugMode === 'boolean' ? debugMode : true;
     const speechEnabled = typeof ttsEnabled === 'boolean' ? ttsEnabled : false;
     const runHeadless = typeof headlessMode === 'boolean' ? headlessMode : false;
+    const shouldSaveTrace = typeof saveTrace === 'boolean' ? saveTrace : false;
+    const shouldSaveThoughts = typeof saveThoughts === 'boolean' ? saveThoughts : false;
+    const shouldSaveScreenshots = typeof saveScreenshots === 'boolean' ? saveScreenshots : false;
     const selectedModel = typeof modelName === 'string' && modelName.trim().length > 0
         ? modelName.trim()
         : 'gemini-2.0-flash';
@@ -109,7 +116,10 @@ app.post('/start', async (req, res) => {
         debugMode: streamDebugMode,
         modelName: selectedModel,
         ttsEnabled: speechEnabled,
-        headlessMode: runHeadless
+        headlessMode: runHeadless,
+        saveTrace: shouldSaveTrace,
+        saveThoughts: shouldSaveThoughts,
+        saveScreenshots: shouldSaveScreenshots
     }).catch(err => {
         console.error("Agent failed to start:", err);
         broadcast('error', "Failed to start agent");
@@ -123,7 +133,10 @@ app.post('/start', async (req, res) => {
         debugMode: streamDebugMode,
         modelName: selectedModel,
         ttsEnabled: speechEnabled,
-        headlessMode: runHeadless
+        headlessMode: runHeadless,
+        saveTrace: shouldSaveTrace,
+        saveThoughts: shouldSaveThoughts,
+        saveScreenshots: shouldSaveScreenshots
     });
 });
 

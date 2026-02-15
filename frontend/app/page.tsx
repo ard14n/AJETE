@@ -38,6 +38,24 @@ interface TTSPayload {
   audioBase64: string;
 }
 
+interface TraceSavedPayload {
+  jsonPath: string;
+  specPath: string;
+  steps: number;
+  jsonUrl?: string;
+  specUrl?: string;
+}
+
+interface ReportReadyPayload {
+  runId: string;
+  jsonPath: string;
+  csvPath: string;
+  pdfPath: string;
+  jsonUrl: string;
+  csvUrl: string;
+  pdfUrl: string;
+}
+
 export default function DriveDashboard() {
   // State
   const [url, setUrl] = useState('https://www.bmw-motorrad.de');
@@ -62,6 +80,24 @@ export default function DriveDashboard() {
       geduld: '🎯 Analytisch & effizient',
       fokus: 'Touch-Targets, Responsive',
       emoji: '📱'
+    },
+    a11y: {
+      name: 'Miriam Schneider',
+      alter: '41 Jahre',
+      beruf: 'Accessibility Consultant',
+      technik: 'Desktop, Zoom & Reduced Motion',
+      geduld: '🧭 Methodisch & aufmerksam',
+      fokus: 'Labels, Verständlichkeit, Zugänglichkeit',
+      emoji: '♿'
+    },
+    a11y_keyboard: {
+      name: 'Miriam Schneider',
+      alter: '41 Jahre',
+      beruf: 'Accessibility Consultant (Keyboard)',
+      technik: 'Keyboard-only, Reduced Motion, Desktop',
+      geduld: '⌨️ Sehr strukturiert',
+      fokus: 'Tab-Reihenfolge, Fokus, Tastaturbedienbarkeit',
+      emoji: '⌨️'
     },
     helmut: {
       name: 'Helmut Berger',
@@ -102,6 +138,9 @@ export default function DriveDashboard() {
   const [debugMode, setDebugMode] = useState(true);
   const [ttsEnabled, setTtsEnabled] = useState(false);
   const [headlessMode, setHeadlessMode] = useState(false);
+  const [saveTrace, setSaveTrace] = useState(false);
+  const [saveThoughts, setSaveThoughts] = useState(false);
+  const [saveScreenshots, setSaveScreenshots] = useState(false);
   const [modelName, setModelName] = useState('gemini-2.0-flash');
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([
     { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash' }
@@ -111,6 +150,12 @@ export default function DriveDashboard() {
   const activeProfile = personaProfiles[persona];
   const stepCount = steps.length;
   const compactModelName = modelName.length > 24 ? `${modelName.slice(0, 21)}...` : modelName;
+  const [traceDownload, setTraceDownload] = useState<{ specUrl: string | null; jsonUrl: string | null }>(
+    { specUrl: null, jsonUrl: null }
+  );
+  const [reportDownload, setReportDownload] = useState<{ pdfUrl: string | null; csvUrl: string | null; jsonUrl: string | null }>(
+    { pdfUrl: null, csvUrl: null, jsonUrl: null }
+  );
 
   const wsRef = useRef<WebSocket | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -335,6 +380,29 @@ export default function DriveDashboard() {
         case 'tts':
           playTtsRef.current(data.payload as TTSPayload);
           break;
+        case 'trace_saved':
+          // eslint-disable-next-line no-case-declarations
+          const traceData = data.payload as TraceSavedPayload;
+          addLogRef.current('status', `Trace gespeichert (${traceData.steps} Schritte)`);
+          addLogRef.current('status', `Playwright Spec: ${traceData.specPath}`);
+          addLogRef.current('status', `Trace JSON: ${traceData.jsonPath}`);
+          setTraceDownload({
+            specUrl: traceData.specUrl || null,
+            jsonUrl: traceData.jsonUrl || null
+          });
+          break;
+        case 'report_ready':
+          // eslint-disable-next-line no-case-declarations
+          const reportData = data.payload as ReportReadyPayload;
+          addLogRef.current('status', `Report bereit (Run ${reportData.runId})`);
+          addLogRef.current('status', `PDF: ${reportData.pdfPath}`);
+          addLogRef.current('status', `Excel CSV: ${reportData.csvPath}`);
+          setReportDownload({
+            pdfUrl: reportData.pdfUrl || null,
+            csvUrl: reportData.csvUrl || null,
+            jsonUrl: reportData.jsonUrl || null
+          });
+          break;
       }
     };
 
@@ -432,6 +500,8 @@ export default function DriveDashboard() {
   const handleStart = async () => {
     setLogs([]);
     setSteps([]);
+    setTraceDownload({ specUrl: null, jsonUrl: null });
+    setReportDownload({ pdfUrl: null, csvUrl: null, jsonUrl: null });
     try {
       if (ttsEnabled) {
         await ensureTtsAudioContext();
@@ -440,7 +510,18 @@ export default function DriveDashboard() {
       const res = await fetch('http://localhost:3001/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, personaName: persona, objective: payloadObjective, debugMode, modelName, ttsEnabled, headlessMode })
+        body: JSON.stringify({
+          url,
+          personaName: persona,
+          objective: payloadObjective,
+          debugMode,
+          modelName,
+          ttsEnabled,
+          headlessMode,
+          saveTrace,
+          saveThoughts,
+          saveScreenshots
+        })
       });
       const data = await res.json();
       if (data.error) addLog('error', data.error);
@@ -531,6 +612,8 @@ export default function DriveDashboard() {
             >
               <option value="dieter">🧓 Dieter (54, Ungeduldig)</option>
               <option value="lukas">📱 Lukas (25, Mobile UX)</option>
+              <option value="a11y">♿ Miriam (A11y First)</option>
+              <option value="a11y_keyboard">⌨️ Miriam (A11y Keyboard)</option>
               <option value="helmut">🏍️ Helmut (35, Motorrad Fan)</option>
               <option value="bare">🤖 Bare LLM (Keine Persona)</option>
               <option value="monkey">🐒 Monkey Mode (Random)</option>
@@ -599,6 +682,42 @@ export default function DriveDashboard() {
               {headlessMode ? 'ON' : 'OFF'}
             </button>
           </div>
+
+          <div className="flex items-center justify-between rounded-lg border border-[#2e486a] bg-[#071527]/75 px-3 py-2">
+            <span className="drive-label !mb-0">Save Trace</span>
+            <button
+              type="button"
+              onClick={() => setSaveTrace((prev) => !prev)}
+              data-on={saveTrace}
+              className="drive-toggle"
+            >
+              {saveTrace ? 'ON' : 'OFF'}
+            </button>
+          </div>
+
+          <div className="flex items-center justify-between rounded-lg border border-[#2e486a] bg-[#071527]/75 px-3 py-2">
+            <span className="drive-label !mb-0">Save Thoughts</span>
+            <button
+              type="button"
+              onClick={() => setSaveThoughts((prev) => !prev)}
+              data-on={saveThoughts}
+              className="drive-toggle"
+            >
+              {saveThoughts ? 'ON' : 'OFF'}
+            </button>
+          </div>
+
+          <div className="flex items-center justify-between rounded-lg border border-[#2e486a] bg-[#071527]/75 px-3 py-2">
+            <span className="drive-label !mb-0">Save Screenshots</span>
+            <button
+              type="button"
+              onClick={() => setSaveScreenshots((prev) => !prev)}
+              data-on={saveScreenshots}
+              className="drive-toggle"
+            >
+              {saveScreenshots ? 'ON' : 'OFF'}
+            </button>
+          </div>
         </div>
 
         <div className="drive-panel mt-4 min-w-0 p-4">
@@ -657,6 +776,64 @@ export default function DriveDashboard() {
             <Square size={16} className="fill-current" /> Abort
           </button>
         </div>
+
+        {(traceDownload.specUrl || traceDownload.jsonUrl || reportDownload.pdfUrl || reportDownload.csvUrl || reportDownload.jsonUrl) && (
+          <div className="drive-panel mt-3 p-3">
+            <p className="drive-label mb-2 block">Downloads</p>
+            <div className="grid grid-cols-1 gap-2">
+              {traceDownload.specUrl && (
+                <a
+                  className="drive-download-link"
+                  href={`http://localhost:3001${traceDownload.specUrl}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Download Trace Spec
+                </a>
+              )}
+              {traceDownload.jsonUrl && (
+                <a
+                  className="drive-download-link"
+                  href={`http://localhost:3001${traceDownload.jsonUrl}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Download Trace JSON
+                </a>
+              )}
+              {reportDownload.pdfUrl && (
+                <a
+                  className="drive-download-link"
+                  href={`http://localhost:3001${reportDownload.pdfUrl}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Download Report PDF
+                </a>
+              )}
+              {reportDownload.csvUrl && (
+                <a
+                  className="drive-download-link"
+                  href={`http://localhost:3001${reportDownload.csvUrl}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Download Report Excel CSV
+                </a>
+              )}
+              {reportDownload.jsonUrl && (
+                <a
+                  className="drive-download-link"
+                  href={`http://localhost:3001${reportDownload.jsonUrl}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Download Report JSON
+                </a>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="drive-main flex min-h-[62vh] min-w-0 flex-1 flex-col">
@@ -693,6 +870,18 @@ export default function DriveDashboard() {
               <span className={`drive-chip drive-chip--metric ${headlessMode ? 'drive-chip--on' : ''}`}>
                 <span className="drive-chip-label">Browser</span>
                 <span className="drive-chip-value">{headlessMode ? 'HEADLESS' : 'VISIBLE'}</span>
+              </span>
+              <span className={`drive-chip drive-chip--metric ${saveTrace ? 'drive-chip--on' : ''}`}>
+                <span className="drive-chip-label">Trace</span>
+                <span className="drive-chip-value">{saveTrace ? 'ON' : 'OFF'}</span>
+              </span>
+              <span className={`drive-chip drive-chip--metric ${saveThoughts ? 'drive-chip--on' : ''}`}>
+                <span className="drive-chip-label">Thoughts</span>
+                <span className="drive-chip-value">{saveThoughts ? 'ON' : 'OFF'}</span>
+              </span>
+              <span className={`drive-chip drive-chip--metric ${saveScreenshots ? 'drive-chip--on' : ''}`}>
+                <span className="drive-chip-label">Shots</span>
+                <span className="drive-chip-value">{saveScreenshots ? 'ON' : 'OFF'}</span>
               </span>
               <span className={`drive-chip drive-chip--metric ${isConnected ? 'drive-chip--ok' : 'drive-chip--warn'}`}>
                 <span className="drive-chip-label">WS</span>
