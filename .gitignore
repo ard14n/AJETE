@@ -20,6 +20,7 @@ frontend/node_modules/
 
 # Build / runtime output
 dist/
+.next/
 backend/dist/
 frontend/.next/
 frontend/out/
@@ -29,4 +30,3 @@ coverage/
 *.tsbuildinfo
 backend/*.tsbuildinfo
 frontend/*.tsbuildinfo
-

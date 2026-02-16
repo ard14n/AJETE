@@ -6,6 +6,8 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { DriveAgent } from './agent';
 import { getMonkeyContextPersona, getPersona } from './config/personas';
+import { CampaignSiteInput, runCampaign } from './campaignRunner';
+import { getLegalTopicDetail, listLegalTopics, runLegalComplianceCheck, syncLegalTopicFromWeb } from './legalSuite';
 
 dotenv.config();
 
@@ -35,8 +37,53 @@ const DEFAULT_MODELS = [
     { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash' }
 ];
 
+interface GeminiModelApiEntry {
+    name?: string;
+    displayName?: string;
+    supportedGenerationMethods?: string[];
+}
+
+const normalizeTopicId = (value: unknown): string => {
+    if (typeof value !== 'string') return '';
+    return value.trim().toLowerCase();
+};
+
+const normalizeHttpUrl = (value: unknown): string | null => {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+    try {
+        const parsed = new URL(withProtocol);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+        return parsed.toString();
+    } catch {
+        return null;
+    }
+};
+
+const normalizeCampaignSites = (sites: unknown): CampaignSiteInput[] => {
+    if (!Array.isArray(sites)) return [];
+    return sites
+        .map((site): CampaignSiteInput | null => {
+            if (!site || typeof site !== 'object') return null;
+            const siteRecord = site as Record<string, unknown>;
+            const rawUrl = siteRecord.url;
+            const normalizedUrl = normalizeHttpUrl(rawUrl);
+            if (!normalizedUrl) return null;
+            const rawName = siteRecord.name;
+            const rawObjective = siteRecord.objective;
+            return {
+                url: normalizedUrl,
+                name: typeof rawName === 'string' ? rawName.trim() : undefined,
+                objective: typeof rawObjective === 'string' ? rawObjective.trim() : undefined
+            };
+        })
+        .filter((site): site is CampaignSiteInput => Boolean(site));
+};
+
 // WebSocket Broadcasting
-const broadcast = (type: string, payload: any): number => {
+const broadcast = (type: string, payload: unknown): number => {
     const message = JSON.stringify({ type, payload });
     let delivered = 0;
     wss.clients.forEach(client => {
@@ -151,19 +198,19 @@ app.get('/models', async (_req, res) => {
             throw new Error(`Gemini models API failed: ${response.status} ${response.statusText}`);
         }
 
-        const payload = await response.json() as { models?: Array<any> };
+        const payload = await response.json() as { models?: GeminiModelApiEntry[] };
         const models = (payload.models || [])
-            .filter((model: any) => {
+            .filter((model) => {
                 const methods = model?.supportedGenerationMethods || [];
                 return Array.isArray(methods) && methods.includes('generateContent');
             })
-            .map((model: any) => {
+            .map((model) => {
                 const id = String(model?.name || '').replace(/^models\//, '');
                 const name = model?.displayName || id;
                 return { id, name };
             })
-            .filter((model: any) => model.id.toLowerCase().includes('gemini'))
-            .sort((a: any, b: any) => a.id.localeCompare(b.id));
+            .filter((model) => model.id.toLowerCase().includes('gemini'))
+            .sort((a, b) => a.id.localeCompare(b.id));
 
         if (models.length === 0) {
             return res.json({ models: DEFAULT_MODELS, source: 'fallback-empty' });
@@ -173,6 +220,174 @@ app.get('/models', async (_req, res) => {
     } catch (error) {
         console.error('Failed to load Gemini models:', error);
         res.json({ models: DEFAULT_MODELS, source: 'fallback-error' });
+    }
+});
+
+app.get('/legal/topics', async (_req, res) => {
+    try {
+        const topics = await listLegalTopics();
+        res.json({ topics });
+    } catch (error) {
+        console.error('Failed to list legal topics:', error);
+        res.status(500).json({ error: 'Failed to list legal topics' });
+    }
+});
+
+app.get('/legal/topics/:topicId', async (req, res) => {
+    try {
+        const topicId = normalizeTopicId(req.params.topicId);
+        if (!topicId) {
+            return res.status(400).json({ error: 'topicId is required' });
+        }
+        const detail = await getLegalTopicDetail(topicId);
+        res.json(detail);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/unknown legal topic/i.test(message)) {
+            return res.status(404).json({ error: message });
+        }
+        console.error('Failed to load legal topic detail:', error);
+        res.status(500).json({ error: 'Failed to load legal topic detail' });
+    }
+});
+
+app.post('/legal/topics/:topicId/sync', async (req, res) => {
+    try {
+        const topicId = normalizeTopicId(req.params.topicId);
+        if (!topicId) {
+            return res.status(400).json({ error: 'topicId is required' });
+        }
+        const modelName = typeof req.body?.modelName === 'string' && req.body.modelName.trim()
+            ? req.body.modelName.trim()
+            : 'gemini-2.0-flash';
+
+        const detail = await syncLegalTopicFromWeb(topicId, {
+            apiKey: API_KEY,
+            modelName
+        });
+
+        broadcast('status', `legal-topic-synced:${topicId}`);
+        broadcast('thought', `Legal topic synced: ${detail.name}`);
+        res.json(detail);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/unknown legal topic/i.test(message)) {
+            return res.status(404).json({ error: message });
+        }
+        console.error('Failed to sync legal topic:', error);
+        res.status(500).json({ error: 'Failed to sync legal topic', details: message });
+    }
+});
+
+app.post('/legal/check', async (req, res) => {
+    const topicId = normalizeTopicId(req.body?.topicId);
+    const normalizedUrl = normalizeHttpUrl(req.body?.url);
+    if (!topicId) {
+        return res.status(400).json({ error: 'topicId is required' });
+    }
+    if (!normalizedUrl) {
+        return res.status(400).json({ error: 'A valid URL is required' });
+    }
+
+    const modelName = typeof req.body?.modelName === 'string' && req.body.modelName.trim()
+        ? req.body.modelName.trim()
+        : 'gemini-2.0-flash';
+    const personaName = typeof req.body?.personaName === 'string' && req.body.personaName.trim()
+        ? req.body.personaName.trim()
+        : 'legal_eu';
+    const mode = String(req.body?.mode || '').trim().toLowerCase() === 'explorative'
+        ? 'explorative'
+        : 'snapshot';
+    const maxExplorationSteps = Number.isFinite(Number(req.body?.maxExplorationSteps))
+        ? Math.max(2, Math.min(8, Math.floor(Number(req.body.maxExplorationSteps))))
+        : 4;
+    const runHeadless = typeof req.body?.headlessMode === 'boolean' ? req.body.headlessMode : true;
+
+    try {
+        broadcast('status', `legal-check-start:${topicId}:${mode}`);
+        const result = await runLegalComplianceCheck({
+            apiKey: API_KEY,
+            modelName,
+            topicId,
+            url: normalizedUrl,
+            personaName,
+            mode,
+            maxExplorationSteps,
+            headlessMode: runHeadless,
+            onThought: (entry) => {
+                broadcast('legal_thought', entry);
+                broadcast('thought', `[LEGAL][${entry.phase}] ${entry.message}`);
+            }
+        });
+        broadcast('status', `legal-check-done:${topicId}:${mode}`);
+        broadcast('thought', `Legal check completed for ${normalizedUrl}`);
+        res.json(result);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/unknown legal topic/i.test(message)) {
+            return res.status(404).json({ error: message });
+        }
+        console.error('Failed to run legal check:', error);
+        res.status(500).json({ error: 'Failed to run legal check', details: message });
+    }
+});
+
+app.post('/campaign/run', async (req, res) => {
+    const { sites, personaName, objective, debugMode, modelName, ttsEnabled, headlessMode, saveTrace, saveThoughts, saveScreenshots } = req.body || {};
+    const normalizedSites = normalizeCampaignSites(sites);
+    if (normalizedSites.length === 0) {
+        return res.status(400).json({ error: 'At least one valid campaign site is required' });
+    }
+    if (normalizedSites.length > 10) {
+        return res.status(400).json({ error: 'Campaign supports up to 10 sites per run' });
+    }
+
+    if (agent.isRunning) {
+        return res.status(409).json({ error: 'Agent is already running' });
+    }
+
+    const monkeyMode = String(personaName || '').toLowerCase() === 'monkey';
+    const bareLlmMode = String(personaName || '').toLowerCase() === 'bare';
+    const persona = monkeyMode ? getMonkeyContextPersona() : getPersona(personaName);
+
+    const streamDebugMode = typeof debugMode === 'boolean' ? debugMode : true;
+    const speechEnabled = typeof ttsEnabled === 'boolean' ? ttsEnabled : false;
+    const runHeadless = typeof headlessMode === 'boolean' ? headlessMode : false;
+    const shouldSaveTrace = typeof saveTrace === 'boolean' ? saveTrace : false;
+    const shouldSaveThoughts = typeof saveThoughts === 'boolean' ? saveThoughts : false;
+    const shouldSaveScreenshots = typeof saveScreenshots === 'boolean' ? saveScreenshots : false;
+    const selectedModel = typeof modelName === 'string' && modelName.trim().length > 0
+        ? modelName.trim()
+        : 'gemini-2.0-flash';
+    const normalizedObjective = typeof objective === 'string' ? objective.trim() : '';
+
+    broadcast('status', 'campaign-starting');
+
+    try {
+        const result = await runCampaign(agent, normalizedSites, {
+            persona,
+            monkeyMode,
+            bareLlmMode,
+            objective: normalizedObjective,
+            debugMode: streamDebugMode,
+            modelName: selectedModel,
+            ttsEnabled: speechEnabled,
+            headlessMode: runHeadless,
+            saveTrace: shouldSaveTrace,
+            saveThoughts: shouldSaveThoughts,
+            saveScreenshots: shouldSaveScreenshots,
+            timeoutMsPerSite: 6 * 60 * 1000
+        });
+        res.json(result);
+    } catch (error) {
+        console.error('Campaign run failed:', error);
+        if (agent.isRunning) {
+            await agent.stop().catch(() => { });
+        }
+        res.status(500).json({
+            error: 'Campaign execution failed',
+            details: error instanceof Error ? error.message : String(error)
+        });
     }
 });
 
