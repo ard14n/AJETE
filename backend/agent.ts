@@ -3,6 +3,8 @@ import { chromium, Browser, BrowserContext, Locator, Page } from 'playwright';
 import { PersonaConfig, PersonaTTSConfig } from './config/personas';
 import { injectSoM, setSoMOverlayVisibility, SoMElementMeta, SoMResult } from './utils/som';
 import { CursorPoint, ensureVisualCursor, generateHumanCursorPath, moveVisualCursor, showCursorClickEffect } from './utils/cursor';
+import { detectSiteProfile, isHighRiskObjective, shouldEnableResearchScoring, SiteProfile } from './config/siteProfiles';
+import { buildResearchReport } from './utils/researchScorer';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { promises as fs } from 'fs';
 import path from 'path';
@@ -40,6 +42,34 @@ interface AgentStartOptions {
 interface TTSAudioPayload {
     audioBase64: string;
     mimeType: string;
+}
+
+type RiskLevel = 'high' | 'critical';
+
+interface ActionConfirmationTarget {
+    targetId?: string;
+    tag?: string;
+    role?: string;
+    text?: string;
+    href?: string;
+}
+
+interface PendingActionConfirmation {
+    id: string;
+    createdAt: string;
+    reason: string;
+    riskLevel: RiskLevel;
+    url: string;
+    action: LLMResponse['action'];
+    value?: string;
+    target?: ActionConfirmationTarget;
+}
+
+interface ActionRiskAssessment {
+    requiresConfirmation: boolean;
+    reason?: string;
+    riskLevel?: RiskLevel;
+    target?: ActionConfirmationTarget;
 }
 
 type TraceActionType = 'goto' | 'click' | 'type' | 'scroll' | 'wait' | 'tab-switch';
@@ -349,6 +379,7 @@ export class DriveAgent extends EventEmitter {
     private isSaveThoughtsEnabled = false;
     private isSaveScreenshotsEnabled = false;
     private selectedModelName = 'gemini-2.0-flash';
+    private currentSiteProfile: SiteProfile = detectSiteProfile();
     private history: LLMResponse[] = [];
     private failedTargetIds: Map<string, number> = new Map();
     private stagnationCounter = 0;
@@ -382,6 +413,10 @@ export class DriveAgent extends EventEmitter {
     private generatedReportJsonPath: string | null = null;
     private generatedReportPdfPath: string | null = null;
     private generatedReportCsvPath: string | null = null;
+    private lastResearchReportSignature = '';
+    private pendingActionConfirmation: PendingActionConfirmation | null = null;
+    private pendingActionConfirmationResolve: ((approved: boolean) => void) | null = null;
+    private pendingActionConfirmationTimer: ReturnType<typeof setTimeout> | null = null;
     private llm: LLMProvider;
 
     constructor(apiKey?: string) {
@@ -915,6 +950,7 @@ th { background: #f1f6fb; text-align: left; }
         this.isSaveThoughtsEnabled = Boolean(options?.saveThoughts);
         this.isSaveScreenshotsEnabled = Boolean(options?.saveScreenshots);
         this.selectedModelName = (options?.modelName || 'gemini-2.0-flash').trim() || 'gemini-2.0-flash';
+        this.currentSiteProfile = detectSiteProfile(url);
         this.ttsConfig = {
             voiceName: persona.tts?.voiceName || DEFAULT_TTS_VOICE,
             languageCode: persona.tts?.languageCode || DEFAULT_TTS_LANGUAGE,
@@ -940,10 +976,14 @@ th { background: #f1f6fb; text-align: left; }
         this.generatedReportJsonPath = null;
         this.generatedReportPdfPath = null;
         this.generatedReportCsvPath = null;
+        this.lastResearchReportSignature = '';
         this.currentRunId = '';
         this.currentRunDir = '';
         this.runStartedAt = '';
         this.clearPendingTtsAck();
+        if (this.pendingActionConfirmation) {
+            this.finishPendingActionConfirmation(false, 'cancelled', 'new run started');
+        }
         this.emit('status', 'starting');
 
         try {
@@ -964,6 +1004,7 @@ th { background: #f1f6fb; text-align: left; }
                 this.emit('thought', 'Bare LLM Persona aktiv: keine Persona-Regeln.');
             }
             this.emit('thought', `Model: ${this.selectedModelName}`);
+            this.emit('thought', `Site Profile: ${this.currentSiteProfile.label}`);
             this.emit('thought', `Debug Mode: ${this.isDebugMode ? 'ON' : 'OFF'}`);
             this.emit('thought', `Voice TTS: ${this.isTtsEnabled ? 'ON' : 'OFF'}`);
             this.emit('thought', `Browser Mode: ${this.isHeadlessMode ? 'HEADLESS' : 'VISIBLE'}`);
@@ -1015,6 +1056,9 @@ th { background: #f1f6fb; text-align: left; }
         this.trackedPages = new WeakSet<Page>();
         this.autoFollowedPages = new WeakSet<Page>();
         this.clearPendingTtsAck();
+        if (this.pendingActionConfirmation) {
+            this.finishPendingActionConfirmation(false, 'cancelled', 'agent stopped');
+        }
         if (shouldPersistTrace) {
             try {
                 await this.persistTraceArtifacts();
@@ -1135,6 +1179,60 @@ th { background: #f1f6fb; text-align: left; }
 
     public setTtsEnabled(enabled: boolean) {
         this.isTtsEnabled = enabled;
+    }
+
+    public resolveActionConfirmation(requestId: string | undefined, approved: boolean, note?: string): boolean {
+        const pending = this.pendingActionConfirmation;
+        if (!pending) return false;
+        if (requestId && requestId !== pending.id) return false;
+        this.finishPendingActionConfirmation(approved, 'user', note);
+        return true;
+    }
+
+    private clearPendingActionConfirmationTimer() {
+        if (!this.pendingActionConfirmationTimer) return;
+        clearTimeout(this.pendingActionConfirmationTimer);
+        this.pendingActionConfirmationTimer = null;
+    }
+
+    private finishPendingActionConfirmation(approved: boolean, source: 'user' | 'timeout' | 'cancelled', note?: string) {
+        const pending = this.pendingActionConfirmation;
+        const resolve = this.pendingActionConfirmationResolve;
+        this.pendingActionConfirmation = null;
+        this.pendingActionConfirmationResolve = null;
+        this.clearPendingActionConfirmationTimer();
+
+        if (pending) {
+            this.emit('confirmation_cleared', {
+                id: pending.id,
+                approved,
+                source,
+                note: note || ''
+            });
+        }
+
+        if (resolve) {
+            resolve(approved);
+        }
+    }
+
+    private async waitForActionConfirmation(request: PendingActionConfirmation): Promise<boolean> {
+        if (!this.isRunning) return false;
+
+        // Defensive: close stale request before opening a new one.
+        if (this.pendingActionConfirmation) {
+            this.finishPendingActionConfirmation(false, 'cancelled', 'superseded');
+        }
+
+        this.pendingActionConfirmation = request;
+        this.emit('confirmation_required', request);
+
+        return await new Promise<boolean>((resolve) => {
+            this.pendingActionConfirmationResolve = resolve;
+            this.pendingActionConfirmationTimer = setTimeout(() => {
+                this.finishPendingActionConfirmation(false, 'timeout', 'no user response');
+            }, 120000);
+        });
     }
 
     private clearPendingTtsAck() {
@@ -1275,6 +1373,7 @@ th { background: #f1f6fb; text-align: left; }
                 console.log("Page closed, stopping loop.");
                 break;
             }
+            this.refreshSiteProfileFromPage();
             stepCount++;
 
             try {
@@ -1321,6 +1420,8 @@ th { background: #f1f6fb; text-align: left; }
                     break;
                 }
 
+                await this.maybeEmitResearchReport(somResult, objective, stepCount);
+
                 // 3. Ask AI
                 this.emit('status', 'thinking');
 
@@ -1356,6 +1457,11 @@ ${dynamicHints}
                 }
 
                 // 4. Execute Action
+                const isConfirmed = await this.maybeRequireConfirmation(decision, somResult, objective);
+                if (!isConfirmed) {
+                    await this.page.waitForTimeout(800).catch(() => { });
+                    continue;
+                }
                 this.emit('status', 'acting');
                 await this.executeAction(decision);
 
@@ -1852,6 +1958,211 @@ ANTI-LOOP WARNUNG:
         return this.stagnationCounter >= 3;
     }
 
+    private refreshSiteProfileFromPage() {
+        if (!this.page) return;
+        const detected = detectSiteProfile(this.page.url());
+        if (detected.id === this.currentSiteProfile.id) return;
+        this.currentSiteProfile = detected;
+        this.emit('thought', `🌐 Site-Profil gewechselt: ${detected.label}`);
+    }
+
+    private buildSiteProfileHint(objective?: string): string {
+        const profile = this.currentSiteProfile;
+        if (!profile) return '';
+
+        const objectiveIsHighRisk = isHighRiskObjective(objective);
+        const objectiveIsResearch = shouldEnableResearchScoring(objective, profile);
+        const priorities = profile.navigationPriorities.slice(0, 4).map((item) => `- ${item}`).join('\n');
+        const antiPatterns = profile.antiPatterns.slice(0, 3).map((item) => `- ${item}`).join('\n');
+
+        return `
+=== SITE PROFILE (${profile.label}) ===
+Kontext: ${profile.description}
+Navigation Prioritaeten:
+${priorities}
+Vermeide:
+${antiPatterns}
+${objectiveIsResearch ? 'Research-Modus ist aktiv: Sammle Produkt-Evidenz (Preis, Bewertungen, Spezifikationen), bevor du ein Fazit ziehst.' : ''}
+${objectiveIsHighRisk ? 'ACHTUNG: Ziel ist potenziell high-risk. Vermeide finale Kauf-/Buchungs-Klicks ohne eindeutige Notwendigkeit.' : ''}
+`;
+    }
+
+    private getTargetMetaFromSom(decision: LLMResponse, somResult: SoMResult | null): ActionConfirmationTarget | undefined {
+        if (!decision.targetId || !somResult?.elements?.length) return undefined;
+        const numericId = Number(decision.targetId);
+        if (!Number.isFinite(numericId)) return { targetId: decision.targetId };
+
+        const meta = somResult.elements.find((entry) => entry.id === numericId);
+        if (!meta) return { targetId: decision.targetId };
+
+        return {
+            targetId: decision.targetId,
+            tag: meta.tag,
+            role: meta.role,
+            text: this.normalizeLabel(meta.text || meta.ariaLabel || meta.title || ''),
+            href: meta.href
+        };
+    }
+
+    private assessActionRisk(decision: LLMResponse, somResult: SoMResult | null, objective?: string): ActionRiskAssessment {
+        if (!this.page) return { requiresConfirmation: false };
+        if (decision.action !== 'click' && decision.action !== 'type') return { requiresConfirmation: false };
+
+        const target = this.getTargetMetaFromSom(decision, somResult);
+        const url = this.page.url().toLowerCase();
+        const objectiveText = String(objective || '').toLowerCase();
+        const thought = String(decision.thought || '').toLowerCase();
+        const value = String(decision.value || '').toLowerCase();
+        const targetText = String(target?.text || '').toLowerCase();
+        const targetHref = String(target?.href || '').toLowerCase();
+        const riskTokens = Array.from(new Set([
+            ...this.currentSiteProfile.riskKeywords,
+            'buy', 'kaufen', 'book', 'checkout', 'zahlung', 'payment', 'order',
+            'submit', 'confirm', 'vertrag', 'apply', 'jetzt'
+        ]));
+        const corpus = `${thought}\n${value}\n${targetText}\n${targetHref}\n${url}\n${objectiveText}`;
+
+        const searchLike = /search|suche|filter|sort|query|keyword/.test(corpus);
+        if (decision.action === 'type' && searchLike && !isHighRiskObjective(objective)) {
+            return { requiresConfirmation: false };
+        }
+
+        const matched = riskTokens.filter((token) => corpus.includes(token.toLowerCase()));
+        const urlRisk = /checkout|payment|order|book|cart|warenkorb|zahlung/.test(url);
+        const explicitCritical = /buy now|jetzt kaufen|book now|jetzt buchen|zahlungspflichtig|place your order|confirm order/.test(corpus);
+        const objectiveRisk = isHighRiskObjective(objective);
+
+        if (matched.length === 0 && !urlRisk && !objectiveRisk) {
+            return { requiresConfirmation: false };
+        }
+
+        const reasonParts: string[] = [];
+        if (target?.text) reasonParts.push(`Target "${target.text}"`);
+        if (target?.href) reasonParts.push(`Href "${target.href}"`);
+        if (matched.length > 0) reasonParts.push(`Keywords: ${matched.slice(0, 5).join(', ')}`);
+        if (urlRisk) reasonParts.push(`URL-Kontext: ${url}`);
+        if (objectiveRisk) reasonParts.push('Objective enthaelt High-Risk-Intent');
+
+        return {
+            requiresConfirmation: true,
+            riskLevel: explicitCritical ? 'critical' : 'high',
+            reason: reasonParts.join(' | ') || 'Potenziell finale Kauf-/Buchungsaktion',
+            target
+        };
+    }
+
+    private async maybeRequireConfirmation(decision: LLMResponse, somResult: SoMResult | null, objective?: string): Promise<boolean> {
+        const risk = this.assessActionRisk(decision, somResult, objective);
+        if (!risk.requiresConfirmation || !risk.reason || !risk.riskLevel) return true;
+
+        const request: PendingActionConfirmation = {
+            id: `confirm-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            createdAt: new Date().toISOString(),
+            reason: risk.reason,
+            riskLevel: risk.riskLevel,
+            url: this.page?.url() || '',
+            action: decision.action,
+            value: decision.value,
+            target: risk.target
+        };
+
+        this.emit('thought', `🔐 Risk Gate (${risk.riskLevel.toUpperCase()}): Freigabe fuer Aktion ${decision.action}${decision.targetId ? ` #${decision.targetId}` : ''} erforderlich.`);
+        const approved = await this.waitForActionConfirmation(request);
+        if (!approved) {
+            this.emit('thought', '🛑 Aktion wurde nicht freigegeben. Ich plane den naechsten sicheren Schritt.');
+        } else {
+            this.emit('thought', '✅ Aktion freigegeben. Ich fuehre den Schritt aus.');
+        }
+        return approved;
+    }
+
+    private async collectResearchSnippets(): Promise<string[]> {
+        if (!this.page) return [];
+
+        return await this.page.evaluate(() => {
+            const selectors = [
+                '[data-asin]',
+                '[data-testid*="product"]',
+                '[class*="product"]',
+                '[class*="price"]',
+                '[class*="rating"]',
+                'article',
+                '[role="article"]',
+                'h1',
+                'h2',
+                'h3',
+                'li',
+                'a'
+            ];
+
+            const isVisible = (el: Element): boolean => {
+                if (!(el instanceof HTMLElement)) return false;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    style.opacity !== '0' &&
+                    rect.width > 8 &&
+                    rect.height > 8 &&
+                    rect.bottom > 0 &&
+                    rect.right > 0 &&
+                    rect.left < window.innerWidth &&
+                    rect.top < window.innerHeight;
+            };
+
+            const snippets: string[] = [];
+            const seen = new Set<string>();
+            for (const selector of selectors) {
+                const nodes = Array.from(document.querySelectorAll(selector));
+                for (const node of nodes) {
+                    if (!isVisible(node)) continue;
+                    const text = ((node as HTMLElement).innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+                    if (!text || text.length < 8) continue;
+                    if (text.length > 220) continue;
+                    if (seen.has(text)) continue;
+                    seen.add(text);
+                    snippets.push(text);
+                    if (snippets.length >= 100) return snippets;
+                }
+            }
+            return snippets;
+        }).catch(() => []);
+    }
+
+    private async maybeEmitResearchReport(somResult: SoMResult | null, objective: string | undefined, stepCount: number) {
+        if (!this.page) return;
+        if (!somResult || somResult.elements.length === 0) return;
+        if (!shouldEnableResearchScoring(objective, this.currentSiteProfile)) return;
+        if (stepCount % 2 !== 0) return;
+
+        const snippets = await this.collectResearchSnippets();
+        const report = buildResearchReport({
+            url: this.page.url(),
+            objective,
+            siteProfile: this.currentSiteProfile,
+            somElements: somResult.elements,
+            pageSnippets: snippets,
+            maxCandidates: 6
+        });
+
+        if (!report || report.topCandidates.length === 0) return;
+
+        const signature = JSON.stringify(
+            report.topCandidates.map((candidate) => `${candidate.title}|${candidate.score}|${candidate.price ?? ''}|${candidate.rating ?? ''}`)
+        );
+        if (signature === this.lastResearchReportSignature) return;
+
+        this.lastResearchReportSignature = signature;
+        this.emit('research_report', report);
+
+        const lead = report.topCandidates[0];
+        if (lead) {
+            const priceLabel = lead.price !== undefined ? ` | Preis: ${lead.price}` : '';
+            const ratingLabel = lead.rating !== undefined ? ` | Rating: ${lead.rating}` : '';
+            this.emit('thought', `📊 Research-Score aktualisiert: #1 ${lead.title} (${lead.score}/100${priceLabel}${ratingLabel})`);
+        }
+    }
+
     private async buildStepHints(somResult: SoMResult | null, objective?: string): Promise<string> {
         if (!this.page) return '';
 
@@ -1912,6 +2223,7 @@ ANTI-LOOP WARNUNG:
             .map(([id, count]) => `#${id} (${count}x fehlgeschlagen)`);
 
         const loopGuard = this.buildLoopGuardHint();
+        const siteProfileHint = this.buildSiteProfileHint(objective);
 
         return `
 === AKTUELLE SEITENKONTEXT-DATEN ===
@@ -1921,6 +2233,7 @@ SoM-Elemente: ${somResult?.count ?? 0}
 ${visibleMenuLabels.length > 0 ? `Sichtbare relevante Labels: ${visibleMenuLabels.join(' | ')}` : ''}
 ${scored.length > 0 ? `Relevante SoM-IDs:\n${scored.join('\n')}` : ''}
 ${failedTargets.length > 0 ? `Fehlgeschlagene IDs (vermeiden): ${failedTargets.join(', ')}` : ''}
+${siteProfileHint}
 ${loopGuard}
 `;
     }

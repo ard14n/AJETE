@@ -56,6 +56,56 @@ interface ReportReadyPayload {
   pdfUrl: string;
 }
 
+interface ActionConfirmationPayload {
+  id: string;
+  createdAt: string;
+  reason: string;
+  riskLevel: 'high' | 'critical';
+  url: string;
+  action: string;
+  value?: string;
+  target?: {
+    targetId?: string;
+    tag?: string;
+    role?: string;
+    text?: string;
+    href?: string;
+  };
+}
+
+interface ActionConfirmationClearedPayload {
+  id: string;
+  approved: boolean;
+  source: 'user' | 'timeout' | 'cancelled' | string;
+  note?: string;
+}
+
+interface ResearchCandidatePayload {
+  rank: number;
+  title: string;
+  score: number;
+  price?: number;
+  rating?: number;
+  reviewCount?: number;
+  signals: string[];
+}
+
+interface ResearchReportPayload {
+  generatedAt: string;
+  url: string;
+  objective: string;
+  siteProfileId: string;
+  siteProfileLabel: string;
+  metrics: {
+    candidateCount: number;
+    withPrice: number;
+    withRating: number;
+    withReviewCount: number;
+    averageScore: number;
+  };
+  topCandidates: ResearchCandidatePayload[];
+}
+
 interface CampaignSiteInput {
   name: string;
   url: string;
@@ -216,6 +266,8 @@ export default function DriveDashboard() {
   const [reportDownload, setReportDownload] = useState<{ pdfUrl: string | null; csvUrl: string | null; jsonUrl: string | null }>(
     { pdfUrl: null, csvUrl: null, jsonUrl: null }
   );
+  const [pendingConfirmation, setPendingConfirmation] = useState<ActionConfirmationPayload | null>(null);
+  const [researchReport, setResearchReport] = useState<ResearchReportPayload | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -301,6 +353,36 @@ export default function DriveDashboard() {
       // ignore send errors
     }
   }, []);
+
+  const submitActionConfirmation = useCallback(async (approved: boolean) => {
+    const current = pendingConfirmation;
+    if (!current) return;
+
+    const payload = {
+      id: current.id,
+      approved,
+      note: approved ? 'approved via ui' : 'rejected via ui'
+    };
+
+    try {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'action_confirmation',
+          payload
+        }));
+      } else {
+        await fetch('http://localhost:3001/confirm-action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+      }
+      addLogRef.current('status', `Risk action ${approved ? 'approved' : 'rejected'}: ${current.action.toUpperCase()}`);
+      setPendingConfirmation((prev) => (prev?.id === current.id ? null : prev));
+    } catch {
+      addLogRef.current('error', 'Action confirmation konnte nicht gesendet werden.');
+    }
+  }, [pendingConfirmation]);
 
   const playTtsPayload = useCallback((payload: TTSPayload) => {
     if (!payload?.id) return;
@@ -463,6 +545,30 @@ export default function DriveDashboard() {
             jsonUrl: reportData.jsonUrl || null
           });
           break;
+        case 'confirmation_required':
+          // eslint-disable-next-line no-case-declarations
+          const confirmPayload = data.payload as ActionConfirmationPayload;
+          setPendingConfirmation(confirmPayload);
+          addLogRef.current(
+            'status',
+            `Risk Gate: waiting for approval (${confirmPayload.action.toUpperCase()}${confirmPayload.target?.targetId ? ` #${confirmPayload.target.targetId}` : ''})`
+          );
+          break;
+        case 'confirmation_cleared':
+          // eslint-disable-next-line no-case-declarations
+          const cleared = data.payload as ActionConfirmationClearedPayload;
+          setPendingConfirmation((prev) => (prev?.id === cleared.id ? null : prev));
+          addLogRef.current('status', `Risk Gate resolved: ${cleared.approved ? 'APPROVED' : 'REJECTED'} (${cleared.source})`);
+          break;
+        case 'research_report':
+          // eslint-disable-next-line no-case-declarations
+          const researchPayload = data.payload as ResearchReportPayload;
+          setResearchReport(researchPayload);
+          addLogRef.current(
+            'status',
+            `Research report updated (${researchPayload.topCandidates.length} candidates, avg ${researchPayload.metrics.averageScore})`
+          );
+          break;
       }
     };
 
@@ -564,6 +670,8 @@ export default function DriveDashboard() {
     setTraceDownload({ specUrl: null, jsonUrl: null });
     setReportDownload({ pdfUrl: null, csvUrl: null, jsonUrl: null });
     setCampaignResult(null);
+    setPendingConfirmation(null);
+    setResearchReport(null);
     try {
       if (ttsEnabled) {
         await ensureTtsAudioContext();
@@ -595,6 +703,7 @@ export default function DriveDashboard() {
   const handleStop = async () => {
     try {
       setCampaignRunning(false);
+      setPendingConfirmation(null);
       if (ttsAudioRef.current) {
         ttsAudioRef.current.pause();
         ttsAudioRef.current = null;
@@ -655,6 +764,8 @@ export default function DriveDashboard() {
     setSteps([]);
     setTraceDownload({ specUrl: null, jsonUrl: null });
     setReportDownload({ pdfUrl: null, csvUrl: null, jsonUrl: null });
+    setPendingConfirmation(null);
+    setResearchReport(null);
 
     try {
       if (ttsEnabled) {
@@ -969,6 +1080,38 @@ export default function DriveDashboard() {
           </div>
         )}
 
+        {pendingConfirmation && (
+          <div className="drive-panel mt-3 border-[#5f2d36] bg-[linear-gradient(160deg,rgba(56,18,24,0.66),rgba(22,8,12,0.9))] p-3">
+            <p className="drive-label mb-1 block text-[#ffb4bf]">Risk Confirmation Required</p>
+            <p className="text-xs leading-5 text-[#ffdce1]">
+              {pendingConfirmation.riskLevel.toUpperCase()} | {pendingConfirmation.action.toUpperCase()}
+              {pendingConfirmation.target?.targetId ? ` #${pendingConfirmation.target.targetId}` : ''}
+            </p>
+            <p className="mt-1 text-[11px] leading-5 text-[#ffdce1]/90">{pendingConfirmation.reason}</p>
+            {pendingConfirmation.target?.text && (
+              <p className="mt-1 text-[11px] leading-5 text-[#ffdce1]/85">
+                Target: {pendingConfirmation.target.text}
+              </p>
+            )}
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => void submitActionConfirmation(false)}
+                className="drive-btn drive-btn--danger !py-2 !text-xs"
+              >
+                Reject
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitActionConfirmation(true)}
+                className="drive-btn drive-btn--primary !py-2 !text-xs"
+              >
+                Approve
+              </button>
+            </div>
+          </div>
+        )}
+
         {(traceDownload.specUrl || traceDownload.jsonUrl || reportDownload.pdfUrl || reportDownload.csvUrl || reportDownload.jsonUrl) && (
           <div className="drive-panel mt-3 p-3">
             <p className="drive-label mb-2 block">Downloads</p>
@@ -1023,6 +1166,30 @@ export default function DriveDashboard() {
                   Download Report JSON
                 </a>
               )}
+            </div>
+          </div>
+        )}
+
+        {researchReport && (
+          <div className="drive-panel mt-3 p-3">
+            <p className="drive-label mb-1 block">Research Scoreboard</p>
+            <p className="mb-2 text-[11px] text-[#7c95b4]">
+              {researchReport.siteProfileLabel} | avg {researchReport.metrics.averageScore} | candidates {researchReport.metrics.candidateCount}
+            </p>
+            <div className="space-y-2">
+              {researchReport.topCandidates.slice(0, 4).map((candidate) => (
+                <div key={`research-candidate-${candidate.rank}-${candidate.title}`} className="rounded-md border border-[#24415f] bg-[#081829]/70 px-2.5 py-2">
+                  <p className="text-xs font-medium text-[#dff0ff]">
+                    #{candidate.rank} {candidate.title}
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-[#8fb3d5]">
+                    Score {candidate.score}
+                    {candidate.price !== undefined ? ` | ${candidate.price}` : ''}
+                    {candidate.rating !== undefined ? ` | Rating ${candidate.rating}` : ''}
+                    {candidate.reviewCount !== undefined ? ` | Reviews ${candidate.reviewCount}` : ''}
+                  </p>
+                </div>
+              ))}
             </div>
           </div>
         )}
@@ -1137,6 +1304,18 @@ export default function DriveDashboard() {
                 <span className="drive-chip-label">Mode</span>
                 <span className="drive-chip-value">{campaignMode ? 'CAMPAIGN' : 'SINGLE'}</span>
               </span>
+              {pendingConfirmation && (
+                <span className="drive-chip drive-chip--metric drive-chip--warn">
+                  <span className="drive-chip-label">Risk Gate</span>
+                  <span className="drive-chip-value">WAITING</span>
+                </span>
+              )}
+              {researchReport && (
+                <span className="drive-chip drive-chip--metric drive-chip--on">
+                  <span className="drive-chip-label">Research</span>
+                  <span className="drive-chip-value">LIVE</span>
+                </span>
+              )}
               <span className={`drive-chip drive-chip--metric ${isConnected ? 'drive-chip--ok' : 'drive-chip--warn'}`}>
                 <span className="drive-chip-label">WS</span>
                 <span className="drive-chip-value">{isConnected ? 'ONLINE' : 'OFFLINE'}</span>

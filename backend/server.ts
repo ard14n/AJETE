@@ -110,6 +110,9 @@ agent.on('tts', (data) => {
 agent.on('error', (err) => broadcast('error', err.message));
 agent.on('trace_saved', (data) => broadcast('trace_saved', data));
 agent.on('report_ready', (data) => broadcast('report_ready', data));
+agent.on('confirmation_required', (data) => broadcast('confirmation_required', data));
+agent.on('confirmation_cleared', (data) => broadcast('confirmation_cleared', data));
+agent.on('research_report', (data) => broadcast('research_report', data));
 
 wss.on('connection', (socket) => {
     socket.on('message', (raw) => {
@@ -126,6 +129,17 @@ wss.on('connection', (socket) => {
             if (message?.type === 'tts_toggle') {
                 const enabled = Boolean(message?.payload?.enabled);
                 agent.setTtsEnabled(enabled);
+                return;
+            }
+
+            if (message?.type === 'action_confirmation') {
+                const requestId = typeof message?.payload?.id === 'string' ? message.payload.id.trim() : '';
+                const approved = Boolean(message?.payload?.approved);
+                const note = typeof message?.payload?.note === 'string' ? message.payload.note : undefined;
+                const accepted = agent.resolveActionConfirmation(requestId || undefined, approved, note);
+                if (!accepted) {
+                    broadcast('thought', `Confirmation ignored (request not found): ${requestId || 'n/a'}`);
+                }
             }
         } catch {
             // Ignore malformed WS messages from clients
@@ -394,6 +408,19 @@ app.post('/campaign/run', async (req, res) => {
 app.post('/stop', async (req, res) => {
     await agent.stop();
     res.json({ status: 'stopped' });
+});
+
+app.post('/confirm-action', (req, res) => {
+    const requestId = typeof req.body?.id === 'string' ? req.body.id.trim() : '';
+    const approved = Boolean(req.body?.approved);
+    const note = typeof req.body?.note === 'string' ? req.body.note : undefined;
+    const accepted = agent.resolveActionConfirmation(requestId || undefined, approved, note);
+
+    if (!accepted) {
+        return res.status(404).json({ error: 'No matching pending confirmation request' });
+    }
+
+    res.json({ status: 'ok', id: requestId || null, approved });
 });
 
 server.listen(PORT, '0.0.0.0', () => {
