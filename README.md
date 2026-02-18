@@ -1,16 +1,16 @@
-# DRIVE
+# AJETE
 
-**D**igital **R**easoning & **I**ntelligent **V**ision **E**ngine
+**A**utonomous **J**ob **E**xecution & **T**esting **E**ngine
 
-DRIVE is a prototype agent platform for realistic web journey simulation.  
+AJETE is a prototype agent platform for realistic web journey simulation.  
 It combines browser automation, visual grounding, persona behavior, and live observability in one control center.
 
-The project is currently used as a prototype direction for BMW-oriented UX and journey testing, but the architecture is domain-agnostic.
+The architecture is domain-agnostic and can be used across ecommerce, booking, customer portals, and enterprise web workflows.
 
-## Why DRIVE exists
+## Why AJETE exists
 
 Traditional UI tests answer: "Did this selector still exist?"  
-DRIVE answers: "Would a real user persona still complete this mission?"
+AJETE answers: "Would a real user persona still complete this mission?"
 
 It is designed to test user intent execution, not only DOM correctness:
 
@@ -27,7 +27,7 @@ Set of Marks is the central grounding mechanism for vision-to-action.
 
 How it works:
 
-- DRIVE scans visible/interactable elements in the current viewport.
+- AJETE scans visible/interactable elements in the current viewport.
 - It draws red bounding boxes and numeric IDs (`data-som-id`) over candidates.
 - The screenshot sent to the LLM includes these marks.
 - The LLM returns structured actions (`click`, `type`, `scroll`) against mark IDs.
@@ -62,7 +62,7 @@ This creates a transparent "mind stream" that is useful for UX diagnosis and sta
 
 ### 3) Human-like cursor simulation
 
-Instead of teleport clicks, DRIVE uses generated movement paths:
+Instead of teleport clicks, AJETE uses generated movement paths:
 
 - Curved movement paths
 - Variable speed and easing
@@ -103,12 +103,12 @@ This enables realistic "live usability session" demonstrations with audible reas
 
 ### 7) New-tab following
 
-If an action opens a new tab/window, DRIVE automatically follows it and continues execution there.
+If an action opens a new tab/window, AJETE automatically follows it and continues execution there.
 Fallback handling also switches to another open page if the active tab closes or crashes.
 
 ### 8) Headless mode
 
-DRIVE can run with visible browser UI or fully headless.
+AJETE can run with visible browser UI or fully headless.
 In headless mode, the frontend still receives screenshot/cursor/thought streams via WebSocket.
 
 ## High-level architecture
@@ -130,18 +130,25 @@ flowchart LR
 ## Repository structure
 
 ```text
-drive/
+ajete/
+  app/
+    page.tsx
+    legal/page.tsx
+    stories/page.tsx
+    globals.css
+    layout.tsx
+  public/
   backend/
     agent.ts
     server.ts
     config/personas.ts
+    config/siteProfiles.ts
     utils/som.ts
     utils/cursor.ts
+    utils/researchScorer.ts
     .env.example
-  frontend/
-    app/page.tsx
-    app/globals.css
-    app/layout.tsx
+  package.json
+  next.config.ts
 ```
 
 ## Main runtime interfaces
@@ -202,15 +209,17 @@ npm run dev
 
 Backend runs on `http://localhost:3001`.
 
-### 2) Frontend
+### 2) Web App (Next.js)
+
+In a second terminal, from repository root:
 
 ```bash
-cd frontend
+cd /path/to/ajete
 npm install
 npm run dev
 ```
 
-Frontend runs on `http://localhost:3000`.
+Web app runs on `http://localhost:3000`.
 
 ## Environment and secrets
 
@@ -233,7 +242,7 @@ Current required env vars:
 
 ## Observability
 
-DRIVE exposes rich run telemetry:
+AJETE exposes rich run telemetry:
 
 - Human-readable thought stream
 - Structured step history
@@ -250,7 +259,7 @@ This makes failed flows diagnosable without reproducing blind.
 - Browser audio policies can block TTS until user interaction unlocks audio context.
 - TTS accent/style control is best-effort and model-dependent.
 
-## Suggested BMW prototype use cases
+## Suggested prototype use cases
 
 - Product/accessory discovery journey validation
 - "Can a first-time user complete mission X?" checks
