@@ -23,13 +23,13 @@ const normalizeChecklist = (raw: string): StoryCheckItem[] => {
 };
 
 export default function StoryValidationSuitePage() {
-  const [targetUrl, setTargetUrl] = useState('https://www.bmw.de');
+  const [targetUrl, setTargetUrl] = useState('https://www.example.com');
   const [persona, setPersona] = useState('helmut');
-  const [storyAsA, setStoryAsA] = useState('As a first-time customer');
-  const [storyIWant, setStoryIWant] = useState('I want to compare two vehicle models');
-  const [storySoThat, setStorySoThat] = useState('so that I can choose confidently before requesting a quote');
+  const [storyAsA, setStoryAsA] = useState('As a buyer');
+  const [storyIWant, setStoryIWant] = useState('I want to compare products before checkout');
+  const [storySoThat, setStorySoThat] = useState('so that I can decide quickly with confidence');
   const [acceptanceCriteria, setAcceptanceCriteria] = useState(
-    '- User can find comparison entry point in under 3 interactions\n- At least 2 models can be added to compare\n- Key specs and pricing are visible in compare view\n- User can continue to quote/contact flow from compare view'
+    '- User can find compare entry point in under 3 interactions\n- At least 2 products can be added to compare\n- Key specs and pricing are visible in compare view\n- User can continue to checkout flow from compare view'
   );
   const [includeExploration, setIncludeExploration] = useState(true);
   const [requireLegalSignals, setRequireLegalSignals] = useState(false);

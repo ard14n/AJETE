@@ -341,6 +341,13 @@ body {
   box-shadow: 0 10px 22px rgba(131, 34, 45, 0.26);
 }
 
+.drive-btn--secondary {
+  color: #d9ecff;
+  border-color: rgba(109, 180, 235, 0.45);
+  background: linear-gradient(108deg, #0b2f50, #11466f 48%, #1b5f8f);
+  box-shadow: 0 10px 18px rgba(10, 41, 68, 0.34);
+}
+
 .drive-download-link {
   display: inline-flex;
   align-items: center;

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Play, Square, Terminal, Cpu, Eye, Gauge, ShieldCheck, Layers3 } from 'lucide-react';
 
 // Types
@@ -150,9 +150,129 @@ interface CampaignResultPayload {
   };
 }
 
+type UseCaseKey =
+  | 'product_research'
+  | 'appointment_booking'
+  | 'checkout_validation'
+  | 'workflow_automation'
+  | 'competitive_benchmark'
+  | 'custom';
+
+interface UseCaseTemplate {
+  label: string;
+  description: string;
+  objective: string;
+  successCriteria: string;
+  targetUrl: string;
+  campaignMode: boolean;
+  campaignSitesRaw?: string;
+  persona?: string;
+  toggles?: {
+    debugMode?: boolean;
+    saveTrace?: boolean;
+    saveThoughts?: boolean;
+    saveScreenshots?: boolean;
+    headlessMode?: boolean;
+    ttsEnabled?: boolean;
+  };
+}
+
+const DEFAULT_CAMPAIGN_SITES_RAW = [
+  'Amazon|https://www.amazon.de',
+  'OTTO|https://www.otto.de',
+  'MediaMarkt|https://www.mediamarkt.de'
+].join('\n');
+
+const USE_CASE_TEMPLATES: Record<Exclude<UseCaseKey, 'custom'>, UseCaseTemplate> = {
+  product_research: {
+    label: 'Product Research',
+    description: 'Vergleiche Produkte mit Preis, Rating, Reviews und klarer Evidence.',
+    objective: 'Find the best value product options for the target category and provide evidence-based ranking.',
+    successCriteria: 'At least 5 products compared with price, rating and review count; clear top recommendation.',
+    targetUrl: 'https://www.amazon.de',
+    campaignMode: false,
+    persona: 'helmut',
+    toggles: {
+      debugMode: true,
+      saveTrace: true,
+      saveThoughts: true,
+      saveScreenshots: true,
+      headlessMode: false
+    }
+  },
+  appointment_booking: {
+    label: 'Appointment Booking',
+    description: 'Finde Termin-Slots robust und valide Navigationspfade bis kurz vor finaler Buchung.',
+    objective: 'Navigate booking flow, find earliest available slots and stop before final confirmation.',
+    successCriteria: 'Earliest slot identified, required fields mapped, and final confirmation step reached safely.',
+    targetUrl: 'https://www.doctolib.de',
+    campaignMode: false,
+    persona: 'dieter',
+    toggles: {
+      debugMode: true,
+      saveTrace: true,
+      saveThoughts: true,
+      saveScreenshots: true,
+      headlessMode: false
+    }
+  },
+  checkout_validation: {
+    label: 'Checkout Validation',
+    description: 'Teste Warenkorb- und Checkout-Reibung ohne finale Bestellung auszufuehren.',
+    objective: 'Validate checkout usability and friction from product page to final review step without placing the order.',
+    successCriteria: 'Cart, shipping, payment and review steps reached with friction points and blockers documented.',
+    targetUrl: 'https://www.amazon.de',
+    campaignMode: false,
+    persona: 'lukas',
+    toggles: {
+      debugMode: true,
+      saveTrace: true,
+      saveThoughts: true,
+      saveScreenshots: true,
+      headlessMode: false
+    }
+  },
+  workflow_automation: {
+    label: 'Workflow Automation',
+    description: 'Fuehre strukturierte Website-Aufgaben fuer Ops/Backoffice stabil und reproduzierbar aus.',
+    objective: 'Complete the defined web workflow end-to-end and extract all required output fields.',
+    successCriteria: 'Workflow completed with no dead-end loops and exportable step-by-step trace.',
+    targetUrl: 'https://example.com',
+    campaignMode: false,
+    persona: 'bare',
+    toggles: {
+      debugMode: false,
+      saveTrace: true,
+      saveThoughts: true,
+      saveScreenshots: true,
+      headlessMode: false
+    }
+  },
+  competitive_benchmark: {
+    label: 'Competitive Benchmark',
+    description: 'Vergleiche mehrere Websites in Journey, Friction und visueller Qualitaet.',
+    objective: 'Benchmark competitor user journeys and identify usability, conversion and content quality differences.',
+    successCriteria: 'At least 3 sites compared with report, highlights and ranking summary.',
+    targetUrl: 'https://www.amazon.de',
+    campaignMode: true,
+    campaignSitesRaw: DEFAULT_CAMPAIGN_SITES_RAW,
+    persona: 'lukas',
+    toggles: {
+      debugMode: true,
+      saveTrace: true,
+      saveThoughts: true,
+      saveScreenshots: true,
+      headlessMode: false
+    }
+  }
+};
+
 export default function DriveDashboard() {
+  const initialTemplate = USE_CASE_TEMPLATES.product_research;
+
   // State
-  const [url, setUrl] = useState('https://www.bmw-motorrad.de');
+  const [useCase, setUseCase] = useState<UseCaseKey>('product_research');
+  const [url, setUrl] = useState(initialTemplate.targetUrl);
   const [persona, setPersona] = useState('helmut');
 
   // Persona profiles for dashboard display
@@ -196,10 +316,10 @@ export default function DriveDashboard() {
     helmut: {
       name: 'Helmut Berger',
       alter: '35 Jahre',
-      beruf: 'Ingenieur bei Bosch',
-      technik: 'MacBook Pro, tech-versiert',
-      geduld: '🔍 Geduldig bei Recherche',
-      fokus: 'Technische Daten, Konfigurator',
+      beruf: 'Engineering & Research',
+      technik: 'MacBook Pro, power-user',
+      geduld: '🔍 Geduldig bei Deep Research',
+      fokus: 'Specs, Compare, Decision Quality',
       emoji: '🏍️'
     },
     bare: {
@@ -230,7 +350,8 @@ export default function DriveDashboard() {
       emoji: '🐒'
     }
   };
-  const [objective, setObjective] = useState('');
+  const [objective, setObjective] = useState(initialTemplate.objective);
+  const [successCriteria, setSuccessCriteria] = useState(initialTemplate.successCriteria);
   const [status, setStatus] = useState('idle');
   const [logs, setLogs] = useState<Log[]>([]);
   const [currentImage, setCurrentImage] = useState<string | null>(null);
@@ -246,7 +367,7 @@ export default function DriveDashboard() {
   const [saveScreenshots, setSaveScreenshots] = useState(false);
   const [campaignMode, setCampaignMode] = useState(false);
   const [campaignSitesRaw, setCampaignSitesRaw] = useState(
-    'BMW Motorrad|https://www.bmw-motorrad.de\nMercedes-Benz|https://www.mercedes-benz.de\nAudi|https://www.audi.de'
+    DEFAULT_CAMPAIGN_SITES_RAW
   );
   const [campaignRunning, setCampaignRunning] = useState(false);
   const [campaignResult, setCampaignResult] = useState<CampaignResultPayload | null>(null);
@@ -268,6 +389,11 @@ export default function DriveDashboard() {
   );
   const [pendingConfirmation, setPendingConfirmation] = useState<ActionConfirmationPayload | null>(null);
   const [researchReport, setResearchReport] = useState<ResearchReportPayload | null>(null);
+  const selectedUseCaseTemplate = useMemo(
+    () => (useCase === 'custom' ? null : USE_CASE_TEMPLATES[useCase]),
+    [useCase]
+  );
+  const compactUseCaseName = (selectedUseCaseTemplate?.label || 'Custom').toUpperCase();
 
   const wsRef = useRef<WebSocket | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -292,6 +418,35 @@ export default function DriveDashboard() {
   useEffect(() => {
     addLogRef.current = addLog;
   }, [addLog]);
+
+  const applyUseCaseTemplate = useCallback((nextUseCase: UseCaseKey) => {
+    if (nextUseCase === 'custom') return;
+    const template = USE_CASE_TEMPLATES[nextUseCase];
+
+    setUrl(template.targetUrl);
+    setObjective(template.objective);
+    setSuccessCriteria(template.successCriteria);
+    setCampaignMode(template.campaignMode);
+    if (template.campaignSitesRaw) {
+      setCampaignSitesRaw(template.campaignSitesRaw);
+    } else if (!template.campaignMode) {
+      setCampaignSitesRaw(DEFAULT_CAMPAIGN_SITES_RAW);
+    }
+    if (template.persona) {
+      setPersona(template.persona);
+    }
+
+    if (template.toggles) {
+      if (typeof template.toggles.debugMode === 'boolean') setDebugMode(template.toggles.debugMode);
+      if (typeof template.toggles.saveTrace === 'boolean') setSaveTrace(template.toggles.saveTrace);
+      if (typeof template.toggles.saveThoughts === 'boolean') setSaveThoughts(template.toggles.saveThoughts);
+      if (typeof template.toggles.saveScreenshots === 'boolean') setSaveScreenshots(template.toggles.saveScreenshots);
+      if (typeof template.toggles.headlessMode === 'boolean') setHeadlessMode(template.toggles.headlessMode);
+      if (typeof template.toggles.ttsEnabled === 'boolean') setTtsEnabled(template.toggles.ttsEnabled);
+    }
+
+    addLogRef.current('status', `Template applied: ${template.label}`);
+  }, []);
 
   const base64ToArrayBuffer = useCallback((base64: string): ArrayBuffer => {
     const binary = window.atob(base64);
@@ -485,7 +640,7 @@ export default function DriveDashboard() {
     ws.onopen = () => {
       console.log('[WS] Connected');
       setIsConnected(true);
-      addLogRef.current('status', 'Connected to DRIVE Backend');
+      addLogRef.current('status', 'Connected to AJETE Backend');
       try {
         ws.send(JSON.stringify({ type: 'tts_toggle', payload: { enabled: ttsEnabled } }));
       } catch {
@@ -676,7 +831,11 @@ export default function DriveDashboard() {
       if (ttsEnabled) {
         await ensureTtsAudioContext();
       }
-      const payloadObjective = isMonkeyMode ? '' : objective;
+      const payloadObjective = isMonkeyMode
+        ? ''
+        : [objective.trim(), successCriteria.trim() ? `Success criteria: ${successCriteria.trim()}` : '']
+          .filter(Boolean)
+          .join('\n\n');
       const res = await fetch('http://localhost:3001/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -754,7 +913,7 @@ export default function DriveDashboard() {
     if (campaignRunning) return;
     const sites = parseCampaignSites();
     if (sites.length === 0) {
-      addLog('error', 'Campaign benötigt mindestens eine gültige Site (Format: Name|https://example.com)');
+      addLog('error', 'Benchmark benötigt mindestens eine gültige Site (Format: Name|https://example.com)');
       return;
     }
 
@@ -772,7 +931,11 @@ export default function DriveDashboard() {
         await ensureTtsAudioContext();
       }
 
-      const payloadObjective = isMonkeyMode ? '' : objective;
+      const payloadObjective = isMonkeyMode
+        ? ''
+        : [objective.trim(), successCriteria.trim() ? `Success criteria: ${successCriteria.trim()}` : '']
+          .filter(Boolean)
+          .join('\n\n');
       const res = await fetch('http://localhost:3001/campaign/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -792,14 +955,14 @@ export default function DriveDashboard() {
 
       const data = await res.json();
       if (!res.ok || data?.error) {
-        addLog('error', data?.error || 'Campaign konnte nicht gestartet werden');
+        addLog('error', data?.error || 'Benchmark konnte nicht gestartet werden');
         return;
       }
 
       setCampaignResult(data as CampaignResultPayload);
-      addLog('status', `Campaign abgeschlossen (${sites.length} Sites, ${(Number(data.durationMs || 0) / 1000).toFixed(1)}s)`);
+      addLog('status', `Benchmark abgeschlossen (${sites.length} Sites, ${(Number(data.durationMs || 0) / 1000).toFixed(1)}s)`);
     } catch {
-      addLog('error', 'Campaign API ist nicht erreichbar');
+      addLog('error', 'Benchmark API ist nicht erreichbar');
     } finally {
       setCampaignRunning(false);
     }
@@ -836,10 +999,10 @@ export default function DriveDashboard() {
               <Cpu className="h-6 w-6 text-white" />
             </div>
             <div>
-              <h1 className="font-display text-3xl leading-none text-white">DRIVE</h1>
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#9db6d3]">Exploration Suite</p>
+              <h1 className="font-display text-3xl leading-none text-white">AJETE</h1>
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#9db6d3]">Agent Operations Suite</p>
               <p className="mt-1 text-[10px] leading-4 text-[#7fa6ca]">
-                Digital Reasoning &amp; Intelligent Vision Engine
+                Autonomous Job Execution &amp; Testing Engine
               </p>
             </div>
           </div>
@@ -848,6 +1011,37 @@ export default function DriveDashboard() {
 
         <div className="drive-panel mt-4 min-w-0 space-y-4 p-4">
           <div>
+            <label className="drive-label mb-2 block">Use Case Template</label>
+            <div className="grid grid-cols-[1fr_auto] gap-2">
+              <select
+                value={useCase}
+                onChange={(e) => setUseCase(e.target.value as UseCaseKey)}
+                className="drive-select text-sm"
+              >
+                <option value="product_research">Product Research</option>
+                <option value="appointment_booking">Appointment Booking</option>
+                <option value="checkout_validation">Checkout Validation</option>
+                <option value="workflow_automation">Workflow Automation</option>
+                <option value="competitive_benchmark">Competitive Benchmark</option>
+                <option value="custom">Custom</option>
+              </select>
+              <button
+                type="button"
+                onClick={() => applyUseCaseTemplate(useCase)}
+                disabled={useCase === 'custom'}
+                className="drive-btn drive-btn--secondary !px-3 !py-2 !text-xs"
+              >
+                Apply
+              </button>
+            </div>
+            <p className="mt-1 text-[11px] leading-5 text-[#7c95b4]">
+              {selectedUseCaseTemplate
+                ? selectedUseCaseTemplate.description
+                : 'Custom mode: define URL, objective and success criteria manually.'}
+            </p>
+          </div>
+
+          <div>
             <label className="drive-label mb-2 block">Target URL</label>
             <input
               type="text"
@@ -855,7 +1049,7 @@ export default function DriveDashboard() {
               onChange={(e) => setUrl(e.target.value)}
               disabled={campaignMode}
               className="drive-input text-sm"
-              placeholder={campaignMode ? 'Single URL in Campaign Mode deaktiviert' : 'https://...'}
+              placeholder={campaignMode ? 'Single URL in Benchmark Mode deaktiviert' : 'https://...'}
             />
           </div>
 
@@ -870,7 +1064,7 @@ export default function DriveDashboard() {
               <option value="lukas">📱 Lukas (25, Mobile UX)</option>
               <option value="a11y">♿ Miriam (A11y First)</option>
               <option value="a11y_keyboard">⌨️ Miriam (A11y Keyboard)</option>
-              <option value="helmut">🏍️ Helmut (35, Motorrad Fan)</option>
+              <option value="helmut">🏍️ Helmut (35, Research Power User)</option>
               <option value="legal_eu">⚖️ Legal EU Auditor</option>
               <option value="bare">🤖 Bare LLM (Keine Persona)</option>
               <option value="monkey">🐒 Monkey Mode (Random)</option>
@@ -894,18 +1088,29 @@ export default function DriveDashboard() {
           </div>
 
           <div>
-            <label className="drive-label mb-2 block">Exploration Objective</label>
+            <label className="drive-label mb-2 block">Task Objective</label>
             <textarea
               value={objective}
               onChange={(e) => setObjective(e.target.value)}
               disabled={isMonkeyMode}
               className="drive-textarea h-24 resize-none text-sm"
-              placeholder={isMonkeyMode ? 'In Monkey Mode nicht aktiv' : "e.g. Explore checkout friction and identify dead-ends"}
+              placeholder={isMonkeyMode ? 'In Monkey Mode nicht aktiv' : "e.g. Find top 5 products with best value and explain ranking"}
+            />
+          </div>
+
+          <div>
+            <label className="drive-label mb-2 block">Success Criteria</label>
+            <textarea
+              value={successCriteria}
+              onChange={(e) => setSuccessCriteria(e.target.value)}
+              disabled={isMonkeyMode}
+              className="drive-textarea h-20 resize-none text-sm"
+              placeholder={isMonkeyMode ? 'In Monkey Mode nicht aktiv' : 'e.g. include price, rating and review evidence for each recommendation'}
             />
           </div>
 
           <div className="flex items-center justify-between rounded-lg border border-[#2e486a] bg-[#071527]/75 px-3 py-2">
-            <span className="drive-label !mb-0">Campaign Mode</span>
+            <span className="drive-label !mb-0">Benchmark Mode</span>
             <button
               type="button"
               onClick={() => setCampaignMode((prev) => !prev)}
@@ -918,12 +1123,12 @@ export default function DriveDashboard() {
 
           {campaignMode && (
             <div>
-              <label className="drive-label mb-2 block">Campaign Sites</label>
+              <label className="drive-label mb-2 block">Benchmark Sites</label>
               <textarea
                 value={campaignSitesRaw}
                 onChange={(e) => setCampaignSitesRaw(e.target.value)}
                 className="drive-textarea h-28 resize-y text-sm"
-                placeholder={'BMW|https://www.bmw.de\nMercedes|https://www.mercedes-benz.de'}
+                placeholder={'Amazon|https://www.amazon.de\nOTTO|https://www.otto.de'}
               />
               <p className="mt-1 text-[11px] text-[#7c95b4]">
                 Eine Site pro Zeile. Format: Name|URL oder nur URL. Maximal 10 Sites.
@@ -1051,7 +1256,7 @@ export default function DriveDashboard() {
               disabled={campaignRunning || isSingleRunBusy}
               className="drive-btn drive-btn--primary flex-1"
             >
-              <Layers3 size={16} className="fill-current" /> {campaignRunning ? 'Running Campaign...' : 'Run Campaign'}
+              <Layers3 size={16} className="fill-current" /> {campaignRunning ? 'Running Benchmark...' : 'Run Benchmark'}
             </button>
             <button
               onClick={handleStop}
@@ -1196,7 +1401,7 @@ export default function DriveDashboard() {
 
         {campaignResult && (
           <div className="drive-panel mt-3 p-3">
-            <p className="drive-label mb-1 block">Campaign Comparison</p>
+            <p className="drive-label mb-1 block">Benchmark Comparison</p>
             <p className="mb-2 text-[11px] text-[#7c95b4]">
               {campaignResult.campaignId} | {(campaignResult.durationMs / 1000).toFixed(1)}s total
             </p>
@@ -1270,6 +1475,10 @@ export default function DriveDashboard() {
                 <span className="drive-chip-value">{compactModelName}</span>
               </span>
               <span className="drive-chip drive-chip--metric">
+                <span className="drive-chip-label">Use Case</span>
+                <span className="drive-chip-value">{compactUseCaseName}</span>
+              </span>
+              <span className="drive-chip drive-chip--metric">
                 <span className="drive-chip-label">
                   <Gauge size={12} />
                   Steps
@@ -1302,7 +1511,7 @@ export default function DriveDashboard() {
               </span>
               <span className={`drive-chip drive-chip--metric ${campaignMode ? 'drive-chip--on' : ''}`}>
                 <span className="drive-chip-label">Mode</span>
-                <span className="drive-chip-value">{campaignMode ? 'CAMPAIGN' : 'SINGLE'}</span>
+                <span className="drive-chip-value">{campaignMode ? 'BENCHMARK' : 'SINGLE'}</span>
               </span>
               {pendingConfirmation && (
                 <span className="drive-chip drive-chip--metric drive-chip--warn">

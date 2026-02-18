@@ -132,7 +132,7 @@ export default function LegalSuitePage() {
   const [checking, setChecking] = useState(false);
   const [message, setMessage] = useState('');
 
-  const [checkUrl, setCheckUrl] = useState('https://www.bmw.de');
+  const [checkUrl, setCheckUrl] = useState('https://www.example.com');
   const [checkResult, setCheckResult] = useState<LegalCheckResult | null>(null);
 
   const [modelName, setModelName] = useState('gemini-2.0-flash');
